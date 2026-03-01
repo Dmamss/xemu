@@ -57,7 +57,10 @@ jobs:
         ccache -z
 
     - name: Build with Zen 2 optimizations
-      run: ./build.sh --zen2
+      run: ./build.sh
+      env:
+        CFLAGS: "-march=znver2 -mtune=znver2 -O3 -pipe -fomit-frame-pointer"
+        CXXFLAGS: "-march=znver2 -mtune=znver2 -O3 -pipe -fomit-frame-pointer"
 
     - name: Report ccache stats
       run: ccache -s
