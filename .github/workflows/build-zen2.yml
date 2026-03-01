@@ -61,8 +61,6 @@ jobs:
       DEB_CFLAGS_MAINT_APPEND: -gdwarf-4 -gstrict-dwarf -march=znver2 -mtune=znver2 -O3 -pipe -fomit-frame-pointer
       DEB_CXXFLAGS_MAINT_APPEND: -gdwarf-4 -gstrict-dwarf -march=znver2 -mtune=znver2 -O3 -pipe -fomit-frame-pointer
       DEB_LDFLAGS_MAINT_APPEND: -Wl,--build-id=sha1
-      CFLAGS: "-march=znver2 -mtune=znver2 -O3 -pipe -fomit-frame-pointer"
-      CXXFLAGS: "-march=znver2 -mtune=znver2 -O3 -pipe -fomit-frame-pointer"
       CC: ccache clang-21
       CXX: ccache clang++-21
       CC_LD: lld-21
