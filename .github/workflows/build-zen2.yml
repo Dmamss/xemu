@@ -1,0 +1,68 @@
+name: Build Zen 2 (Steam Deck)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build xemu (Zen 2 optimized)
+    runs-on: ubuntu-22.04
+    env:
+      CCACHE_DIR: /tmp/xemu-ccache
+      CCACHE_MAXSIZE: 512M
+    steps:
+    - name: Clone tree
+      uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v4
+      with:
+        fetch-depth: 0
+        submodules: recursive
+
+    - name: Install dependencies
+      run: |
+        sudo apt-get -qy update
+        sudo apt-get -qy install \
+          ccache \
+          cmake \
+          git \
+          python3 \
+          python3-pip \
+          python3-yaml \
+          python3-venv \
+          ninja-build \
+          libepoxy-dev \
+          libpixman-1-dev \
+          libsdl2-dev \
+          libsamplerate0-dev \
+          zlib1g-dev \
+          libssl-dev \
+          libpcap-dev \
+          libslirp-dev \
+          libvulkan-dev \
+          libusb-1.0-0-dev \
+          libcurl4-gnutls-dev \
+          libpipewire-0.3-dev
+
+    - name: Setup ccache
+      uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v4
+      with:
+        path: ${{ env.CCACHE_DIR }}
+        key: ccache-zen2-${{ github.sha }}
+        restore-keys: ccache-zen2-
+    - name: Initialize ccache
+      run: |
+        mkdir -p ${CCACHE_DIR}
+        echo "PATH=/usr/lib/ccache:$PATH" >> "$GITHUB_ENV"
+        ccache -z
+
+    - name: Build with Zen 2 optimizations
+      run: ./build.sh --zen2
+
+    - name: Report ccache stats
+      run: ccache -s
+
+    - name: Upload binary
+      uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v4
+      with:
+        name: xemu-zen2-steamdeck
+        path: dist/
+        retention-days: 90
