@@ -1,7 +1,9 @@
 name: Build Zen 2 (Steam Deck)
 
 on:
-  workflow_dispatch:
+  push:
+    branches:
+      - 'claude/xemu-zen2-steamdeck-*'
 
 jobs:
   build:
