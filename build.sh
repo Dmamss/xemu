@@ -205,10 +205,17 @@ case "$platform" in # Adjust compilation options based on platform
         postbuild='package_linux'
         if test ! -z "$zen2_opts"; then
             echo 'Applying Zen 2 (Steam Deck LCD) CPU optimizations...'
-            zen2_cflags='-march=znver2 -mtune=znver2 -O3 -pipe -fomit-frame-pointer'
+            zen2_cflags='-march=znver2 -mtune=znver2 -pipe -fomit-frame-pointer'
             sys_cflags="$sys_cflags $zen2_cflags"
-            export CXXFLAGS="${CXXFLAGS} ${zen2_cflags}"
             sys_ldflags="$sys_ldflags -Wl,-O1"
+            # Set optimization via meson to properly override the default -O2
+            # (passing -O3 in cflags is fragile as meson's optimization=2 may override it)
+            if test -z "$debug"; then
+                opts="$opts -Doptimization=3"
+            fi
+            # Zen 2 supports x86-64-v3: enables AVX2, FMA, BMI2, POPCNT
+            # and activates CONFIG_AVX2_OPT for AVX2-optimized QEMU code paths
+            opts="$opts -Dx86_version=3"
         fi
         ;;
     Darwin)
@@ -276,7 +283,7 @@ set -x # Print commands from now on
 
 "${configure}" \
     --extra-cflags="-DXBOX=1 ${build_cflags} ${sys_cflags} ${CFLAGS}" \
-    --extra-ldflags="${sys_ldflags} ${LDFLAGS}" \
+    --extra-ldflags="${sys_ldflags}" \
     --target-list=i386-softmmu \
     ${opts} \
     "$@"
