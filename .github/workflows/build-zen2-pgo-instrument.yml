@@ -63,7 +63,7 @@ jobs:
       DEB_BUILD_MAINT_OPTIONS: optimize=-lto
       DEB_CFLAGS_MAINT_APPEND: -gdwarf-4 -gstrict-dwarf -O3 -fprofile-generate=/tmp/xemu-pgo-profiles
       DEB_CXXFLAGS_MAINT_APPEND: -gdwarf-4 -gstrict-dwarf -O3 -fprofile-generate=/tmp/xemu-pgo-profiles
-      DEB_LDFLAGS_MAINT_APPEND: -Wl,--build-id=sha1 -fprofile-generate
+      DEB_LDFLAGS_MAINT_APPEND: -Wl,--build-id=sha1 -fprofile-generate=/tmp/xemu-pgo-profiles
       CC: ccache clang-21
       CXX: ccache clang++-21
       CC_LD: lld-21
@@ -162,6 +162,31 @@ jobs:
         echo "PATH=/usr/lib/ccache:$PATH" >> "$GITHUB_ENV"
         mkdir -p ${CCACHE_DIR}
         ccache -z
+    - name: Build PGO flush helper object
+      run: |
+        cat > /tmp/pgo_flush.c << 'CEOF'
+        #include <signal.h>
+        #include <stdlib.h>
+
+        void __llvm_profile_write_file(void);
+
+        static void sig_flush(int sig) { (void)sig; __llvm_profile_write_file(); }
+
+        __attribute__((constructor))
+        static void pgo_install_flush(void) {
+            atexit(__llvm_profile_write_file);
+            signal(SIGTERM, sig_flush);
+            signal(SIGINT,  sig_flush);
+        }
+        CEOF
+
+        clang-21 -c /tmp/pgo_flush.c -o /tmp/pgo_flush.o
+
+        # Wrap in a static lib so --whole-archive forces inclusion
+        llvm-ar-21 rcs /tmp/libpgo_flush.a /tmp/pgo_flush.o
+
+        # Append to LDFLAGS so dpkg-buildpackage links it in
+        echo "DEB_LDFLAGS_MAINT_APPEND=${DEB_LDFLAGS_MAINT_APPEND} -Wl,--whole-archive /tmp/libpgo_flush.a -Wl,--no-whole-archive" >> "$GITHUB_ENV"
     - name: Compile
       run: |
         # XXX: dpkg-genbuildinfo takes two minutes on GH runners. Nuke it for now.
@@ -194,7 +219,37 @@ jobs:
         tar -C appimage -xf data.tar*
         install -DT src/xemu.metainfo.xml appimage/usr/share/metainfo/xemu.metainfo.xml
 
-        ./linuxdeploy-x86_64.AppImage --output appimage --appdir appimage
+        # Bundle Clang profile runtime so PGO instrumentation works from AppImage
+        for lib in $(find /usr/lib /usr/lib/llvm-21 -name 'libclang_rt.profile*' 2>/dev/null); do
+          if [ -f "$lib" ]; then
+            echo "Bundling profile runtime: $lib"
+            install -D "$lib" "appimage/usr/lib/$(basename "$lib")"
+          fi
+        done
+
+        # Custom AppRun: sets LLVM_PROFILE_FILE automatically so the user
+        # just launches the AppImage and plays — profiles are collected
+        # transparently. The pgo_flush constructor handles writing on exit.
+        cat > appimage/AppRun << 'APPRUN'
+        #!/usr/bin/env bash
+        SELF="$(readlink -f "$0")"
+        HERE="${SELF%/*}"
+
+        # PGO profile output — persistent dir, survives reboots
+        PGO_DIR="${XEMU_PGO_DIR:-$HOME/.local/share/xemu-pgo}"
+        mkdir -p "$PGO_DIR"
+        export LLVM_PROFILE_FILE="${LLVM_PROFILE_FILE:-$PGO_DIR/xemu-%p-%m.profraw}"
+
+        # Standard AppImage env
+        export PATH="${HERE}/usr/bin:${PATH}"
+        export LD_LIBRARY_PATH="${HERE}/usr/lib:${HERE}/usr/lib/x86_64-linux-gnu:${LD_LIBRARY_PATH}"
+        export XDG_DATA_DIRS="${HERE}/usr/share:${XDG_DATA_DIRS:-/usr/local/share:/usr/share}"
+
+        exec "${HERE}/usr/bin/xemu" "$@"
+        APPRUN
+        chmod +x appimage/AppRun
+
+        ./linuxdeploy-x86_64.AppImage --custom-apprun appimage/AppRun --output appimage --appdir appimage
     - name: Bundle artifacts
       run: |
         mkdir -p dist
