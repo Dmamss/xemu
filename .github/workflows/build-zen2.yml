@@ -1,7 +1,10 @@
-name: "Build Zen 2 AppImage (PGO Phase A — Instrumented)"
+name: Build Zen 2 AppImage
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - 'claude/xemu-zen2-*'
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -51,19 +54,19 @@ jobs:
         compression-level: 0
 
   build:
-    name: Build Zen 2 AppImage PGO Instrumented (x86_64)
+    name: Build Zen 2 AppImage (x86_64)
     needs: source
     runs-on: ubuntu-22.04
     env:
-      ARTIFACT_NAME: xemu-zen2-pgo-instrumented
+      ARTIFACT_NAME: xemu-zen2-x86_64-release
       CCACHE_DIR: /tmp/xemu-ccache
       CCACHE_MAXSIZE: 512M
       LTO_CACHE_DIR: /tmp/xemu-lto-cache
       LTO_CACHE_MAXSIZE: 512m
       DEB_BUILD_MAINT_OPTIONS: optimize=-lto
-      DEB_CFLAGS_MAINT_APPEND: -gdwarf-4 -gstrict-dwarf -O3 -fprofile-generate=/tmp/xemu-pgo-profiles
-      DEB_CXXFLAGS_MAINT_APPEND: -gdwarf-4 -gstrict-dwarf -O3 -fprofile-generate=/tmp/xemu-pgo-profiles
-      DEB_LDFLAGS_MAINT_APPEND: -Wl,--build-id=sha1 -fprofile-generate
+      DEB_CFLAGS_MAINT_APPEND: -gdwarf-4 -gstrict-dwarf -O3
+      DEB_CXXFLAGS_MAINT_APPEND: -gdwarf-4 -gstrict-dwarf -O3
+      DEB_LDFLAGS_MAINT_APPEND: -Wl,--build-id=sha1
       CC: ccache clang-21
       CXX: ccache clang++-21
       CC_LD: lld-21
@@ -91,8 +94,8 @@ jobs:
         path: |
           ${{ env.CCACHE_DIR }}
           ${{ env.LTO_CACHE_DIR }}
-        key: cache-zen2-pgo-instr-${{ runner.os }}-x86_64-${{ github.sha }}
-        restore-keys: cache-zen2-pgo-instr-${{ runner.os }}-x86_64-
+        key: cache-zen2-${{ runner.os }}-x86_64-release-${{ github.sha }}
+        restore-keys: cache-zen2-${{ runner.os }}-x86_64-release-
     - name: Download source package
       uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v4
       with:
@@ -184,7 +187,7 @@ jobs:
       run: ccache -s
     - name: Generate AppImage
       env:
-        VERSION: ${{ needs.source.outputs.pkg_version }}-zen2-pgo-instrumented
+        VERSION: ${{ needs.source.outputs.pkg_version }}-zen2
       run: |
         wget --no-verbose https://github.com/linuxdeploy/linuxdeploy/releases/latest/download/linuxdeploy-x86_64.AppImage
         chmod +x linuxdeploy-x86_64.AppImage
