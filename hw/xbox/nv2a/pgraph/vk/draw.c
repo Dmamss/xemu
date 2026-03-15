@@ -20,6 +20,7 @@
 #include "qemu/osdep.h"
 #include "qemu/fast-hash.h"
 #include "renderer.h"
+#include "ui/xemu-settings.h"
 #include <math.h>
 
 void pgraph_vk_draw_begin(NV2AState *d)
@@ -121,19 +122,63 @@ static bool pipeline_cache_entry_compare(Lru *lru, LruNode *node,
     return memcmp(&snode->key, key, sizeof(PipelineKey));
 }
 
+static char *get_vk_pipeline_cache_path(void)
+{
+    const char *base = xemu_settings_get_base_path();
+    if (!base) {
+        return NULL;
+    }
+    return g_strdup_printf("%s%s", base, "vk_pipeline_cache.bin");
+}
+
 static void init_pipeline_cache(PGRAPHState *pg)
 {
     PGRAPHVkState *r = pg->vk_renderer_state;
 
+    void *cache_data = NULL;
+    size_t cache_size = 0;
+
+    if (g_config.perf.cache_shaders) {
+        char *cache_path = get_vk_pipeline_cache_path();
+        if (cache_path) {
+            FILE *f = qemu_fopen(cache_path, "rb");
+            if (f) {
+                fseek(f, 0, SEEK_END);
+                long file_size = ftell(f);
+                fseek(f, 0, SEEK_SET);
+                if (file_size > 0) {
+                    cache_data = g_malloc(file_size);
+                    if (fread(cache_data, 1, file_size, f) == (size_t)file_size) {
+                        cache_size = file_size;
+                    } else {
+                        g_free(cache_data);
+                        cache_data = NULL;
+                    }
+                }
+                fclose(f);
+            }
+            g_free(cache_path);
+        }
+    }
+
     VkPipelineCacheCreateInfo cache_info = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO,
         .flags = 0,
-        .initialDataSize = 0,
-        .pInitialData = NULL,
+        .initialDataSize = cache_size,
+        .pInitialData = cache_data,
         .pNext = NULL,
     };
-    VK_CHECK(vkCreatePipelineCache(r->device, &cache_info, NULL,
-                                   &r->vk_pipeline_cache));
+    VkResult result = vkCreatePipelineCache(r->device, &cache_info, NULL,
+                                            &r->vk_pipeline_cache);
+    g_free(cache_data);
+
+    if (result != VK_SUCCESS) {
+        /* Cache data may be stale or incompatible; retry without it */
+        cache_info.initialDataSize = 0;
+        cache_info.pInitialData = NULL;
+        VK_CHECK(vkCreatePipelineCache(r->device, &cache_info, NULL,
+                                       &r->vk_pipeline_cache));
+    }
 
     const size_t pipeline_cache_size = 2048;
     lru_init(&r->pipeline_cache);
@@ -152,6 +197,29 @@ static void init_pipeline_cache(PGRAPHState *pg)
 static void finalize_pipeline_cache(PGRAPHState *pg)
 {
     PGRAPHVkState *r = pg->vk_renderer_state;
+
+    if (g_config.perf.cache_shaders) {
+        size_t cache_size = 0;
+        VkResult result = vkGetPipelineCacheData(
+            r->device, r->vk_pipeline_cache, &cache_size, NULL);
+        if (result == VK_SUCCESS && cache_size > 0) {
+            void *cache_data = g_malloc(cache_size);
+            result = vkGetPipelineCacheData(
+                r->device, r->vk_pipeline_cache, &cache_size, cache_data);
+            if (result == VK_SUCCESS) {
+                char *cache_path = get_vk_pipeline_cache_path();
+                if (cache_path) {
+                    FILE *f = qemu_fopen(cache_path, "wb");
+                    if (f) {
+                        fwrite(cache_data, 1, cache_size, f);
+                        fclose(f);
+                    }
+                    g_free(cache_path);
+                }
+            }
+            g_free(cache_data);
+        }
+    }
 
     lru_flush(&r->pipeline_cache);
     g_free(r->pipeline_cache_entries);
