@@ -76,6 +76,14 @@ void xemu_steamdeck_apply_defaults(void)
     }
 
     /*
+     * Renderer: use Vulkan on Steam Deck (RDNA 2).
+     * The Vulkan NV2A backend avoids Mesa's OpenGL-over-Vulkan (Zink) overhead
+     * and gives the GPU driver a lower-level path, improving frame pacing and
+     * reducing CPU-side driver overhead on the Zen 2 cores.
+     */
+    g_config.display.renderer = CONFIG_DISPLAY_RENDERER_VULKAN;
+
+    /*
      * Display: surface scale must be 1x.
      * Scale >= 2x triggers rendering artifacts (broken MLAA/AA) on several
      * Xbox titles. Gamescope + FSR handles the upscale to 1280x800.

@@ -62,6 +62,14 @@ if [ ! -f "$BINARY" ]; then
     exit 1
 fi
 
+# CPU governor: set to performance for consistent frame pacing.
+# Game Mode already sets this automatically; only matters in Desktop Mode.
+_ORIG_GOV=$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 2>/dev/null || echo "")
+if [ -n "$_ORIG_GOV" ] && [ "$_ORIG_GOV" != "performance" ]; then
+    echo performance | sudo tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor >/dev/null 2>&1 || true
+    trap 'echo "$_ORIG_GOV" | sudo tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor >/dev/null 2>&1 || true' EXIT
+fi
+
 exec "$BINARY" -enable-kvm -config_path "$CONFIG" "$@"
 WRAPPER_EOF
 
