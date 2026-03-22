@@ -47,11 +47,12 @@ configure="${project_source_dir}/configure"
 set -x
 
 "${configure}" \
-    --extra-cflags="-DXBOX=1 -DXEMU_STEAM_DECK=1 -Wno-error=redundant-decls ${CFLAGS}" \
+    --extra-cflags="-DXBOX=1 -Wno-error=redundant-decls ${CFLAGS}" \
     --extra-ldflags="" \
     --target-list=i386-softmmu \
     --enable-kvm \
     --disable-werror \
+    -Db_lto=true \
     "$@"
 
 time make -j"${job_count}" qemu-system-i386 2>&1 | tee build-steamdeck.log
