@@ -15,6 +15,7 @@ jobs:
       ARTIFACT_NAME: xemu-steamdeck-scda
       CCACHE_DIR: /tmp/xemu-ccache
       CCACHE_MAXSIZE: 512M
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
     steps:
     - name: Checkout source (with submodules)
