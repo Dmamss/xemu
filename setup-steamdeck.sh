@@ -62,7 +62,7 @@ if [ ! -f "$BINARY" ]; then
     exit 1
 fi
 
-exec "$BINARY" -config_path "$CONFIG" "$@"
+exec "$BINARY" -enable-kvm -config_path "$CONFIG" "$@"
 WRAPPER_EOF
 
 chmod +x "$WRAPPER"

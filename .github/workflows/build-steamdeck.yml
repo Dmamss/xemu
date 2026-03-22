@@ -6,9 +6,6 @@ on:
     branches:
       - claude/xemu-steam-deck-custom-kRMqL
 
-env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-
 jobs:
   build:
     name: Build xemu Steam Deck (x86_64)
@@ -21,12 +18,12 @@ jobs:
 
     steps:
     - name: Checkout source (with submodules)
-      uses: actions/checkout@v4
+      uses: actions/checkout@v5
       with:
         submodules: recursive
 
     - name: Cache ccache
-      uses: actions/cache@v4
+      uses: actions/cache@v5
       with:
         path: ${{ env.CCACHE_DIR }}
         key: steamdeck-ccache-${{ github.sha }}
@@ -45,8 +42,9 @@ jobs:
 
     - name: Configure
       run: |
-        # KVM is skipped here: no /dev/kvm on GitHub runners.
-        # The binary auto-detects KVM at runtime on Steam Deck.
+        # --enable-kvm: compile KVM support into the binary.
+        # GitHub runners have no /dev/kvm, but the binary will use KVM
+        # automatically at runtime on Steam Deck where /dev/kvm is available.
         export CC="ccache gcc"
         export CXX="ccache g++"
         export CFLAGS="-O2 -march=znver2 -mtune=znver2"
@@ -55,6 +53,7 @@ jobs:
           --extra-cflags="-DXBOX=1 -DXEMU_STEAM_DECK=1 -Wno-error=redundant-decls ${CFLAGS}" \
           --extra-ldflags="" \
           --target-list=i386-softmmu \
+          --enable-kvm \
           --disable-werror
 
     - name: Compile
@@ -103,7 +102,7 @@ jobs:
       run: ccache -s
 
     - name: Upload AppImage
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v6
       with:
         name: ${{ env.ARTIFACT_NAME }}
         path: dist/xemu*.AppImage
