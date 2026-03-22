@@ -91,17 +91,19 @@ void xemu_steamdeck_apply_defaults(void)
     g_config.display.quality.surface_scale = 1;
 
     /*
-     * VSync: disabled on Steam Deck.
-     * Gamescope is the compositor; SDL vsync (swap_interval=1) would block
-     * each SDL_GL_SwapWindow() on Gamescope's own vblank. When the user sets
-     * a 30fps frame cap via Steam's Quick Access menu, Gamescope slows its
-     * composition cycle to 33.33ms. xemu's 60Hz vblank timer then double-
-     * throttles (tries to swap every 16.67ms but waits 33.33ms each time)
-     * → 15fps instead of 30fps. See also: xemu issue #1855.
-     * With vsync=false, xemu presents frames without blocking and Gamescope
-     * paces them correctly at the selected frame cap.
+     * VSync: enabled on Steam Deck.
+     * Gamescope runs at 60Hz and frame-doubles xemu output: each xemu frame
+     * is displayed twice, producing stable 30fps for 30fps games like SCDA.
+     * vsync=false causes the render loop to spin at 200fps+, wasting GPU
+     * power and triggering thermal throttling on the Steam Deck APU.
+     *
+     * WARNING: Do NOT use Steam Quick Access "Frame Limit: 30fps" with xemu.
+     * That cap acts on Gamescope's OUTPUT: to produce 30fps output via
+     * frame-doubling, Gamescope only needs 15fps INPUT from xemu, so it
+     * throttles SDL_GL_SwapWindow() to 66.67ms → 15fps. Leave the Steam
+     * frame limit at 60fps (default) or disabled. See: xemu issue #1855.
      */
-    g_config.display.window.vsync = false;
+    g_config.display.window.vsync = true;
 
     /*
      * Display: fullscreen on startup.

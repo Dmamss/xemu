@@ -1347,6 +1347,31 @@ int main(int argc, char **argv)
 
     if (xemu_is_steam_deck()) {
         xemu_steamdeck_apply_defaults();
+
+        /*
+         * Auto-enable KVM on Steam Deck if /dev/kvm is accessible and not
+         * already requested via CLI. Must be done before qemu_main thread
+         * starts (which calls qemu_init). Falls back silently to TCG if
+         * /dev/kvm is unavailable.
+         */
+        bool kvm_already_requested = false;
+        for (int i = 1; i < gArgc; i++) {
+            if (gArgv[i] && strcmp(gArgv[i], "-enable-kvm") == 0) {
+                kvm_already_requested = true;
+                break;
+            }
+        }
+        if (!kvm_already_requested && access("/dev/kvm", R_OK | W_OK) == 0) {
+            int new_argc = gArgc + 1;
+            char **new_argv = g_new(char *, new_argc + 1);
+            new_argv[0] = gArgv[0];
+            new_argv[1] = (char *)"-enable-kvm";
+            for (int i = 1; i < gArgc; i++) new_argv[i + 1] = gArgv[i];
+            new_argv[new_argc] = NULL;
+            gArgc = new_argc;
+            gArgv = new_argv;
+            fprintf(stderr, "[SteamDeck] /dev/kvm found, enabling KVM acceleration\n");
+        }
     }
 
 #ifdef _WIN32
