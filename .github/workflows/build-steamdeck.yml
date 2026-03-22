@@ -1,0 +1,118 @@
+name: Build Steam Deck Custom (SCDA)
+
+# Trigger manually from GitHub Actions tab, or on push to the custom branch
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - claude/xemu-steam-deck-custom-kRMqL
+
+jobs:
+  build:
+    name: Build xemu Steam Deck (x86_64)
+    runs-on: ubuntu-22.04
+
+    env:
+      ARTIFACT_NAME: xemu-steamdeck-scda
+      CCACHE_DIR: /tmp/xemu-ccache
+      CCACHE_MAXSIZE: 512M
+
+    steps:
+    - name: Checkout source
+      uses: actions/checkout@v4
+      with:
+        submodules: recursive
+
+    - name: Cache ccache
+      uses: actions/cache@v4
+      with:
+        path: ${{ env.CCACHE_DIR }}
+        key: steamdeck-ccache-${{ github.sha }}
+        restore-keys: steamdeck-ccache-
+
+    - name: Install build dependencies
+      run: |
+        sudo apt-get -qy update
+        sudo apt-get -qy install \
+          ccache ninja-build python3-pip meson \
+          libsdl2-dev libepoxy-dev libpixman-1-dev \
+          libglib2.0-dev zlib1g-dev libpng-dev \
+          libslirp-dev libusb-1.0-0-dev \
+          wget libfuse2
+
+    - name: Setup ccache
+      run: |
+        mkdir -p ${CCACHE_DIR}
+        echo "PATH=/usr/lib/ccache:$PATH" >> "$GITHUB_ENV"
+        ccache -z
+
+    - name: Build (Steam Deck flags)
+      run: |
+        # Use Steam Deck optimizations:
+        #   -march=znver2       Zen 2 CPU (Steam Deck)
+        #   -O2                 Release optimization
+        #   --disable-werror    Match Linux build.sh
+        # Note: --enable-kvm skipped in CI (no /dev/kvm on GitHub runners)
+        #       KVM will be enabled when running on the actual Steam Deck.
+        export CFLAGS="-O2 -march=znver2 -mtune=znver2"
+
+        ./configure \
+          --extra-cflags="-DXBOX=1 -DXEMU_STEAM_DECK=1 -Wno-error=redundant-decls ${CFLAGS}" \
+          --target-list=i386-softmmu \
+          --disable-werror
+
+        make -j$(nproc) qemu-system-i386 2>&1 | tee build.log
+
+        mkdir -p dist
+        cp build/qemu-system-i386 dist/xemu-steamdeck
+        chmod +x dist/xemu-steamdeck
+
+    - name: Generate AppImage
+      env:
+        VERSION: steamdeck-scda-${{ github.sha }}
+      run: |
+        # Download linuxdeploy to bundle dependencies into a portable AppImage
+        wget -q https://github.com/linuxdeploy/linuxdeploy/releases/latest/download/linuxdeploy-x86_64.AppImage
+        chmod +x linuxdeploy-x86_64.AppImage
+
+        # Create AppDir structure
+        mkdir -p AppDir/usr/bin
+        cp dist/xemu-steamdeck AppDir/usr/bin/xemu
+
+        # Desktop entry + icon required by linuxdeploy
+        mkdir -p AppDir/usr/share/applications AppDir/usr/share/icons/hicolor/256x256/apps
+        cat > AppDir/usr/share/applications/xemu.desktop << 'EOF'
+        [Desktop Entry]
+        Name=xemu (Steam Deck)
+        Comment=Original Xbox Emulator - Steam Deck custom build with SCDA patches
+        Exec=xemu
+        Icon=xemu
+        Type=Application
+        Categories=Game;Emulator;
+        EOF
+
+        # Use xemu's existing icon if available, else create a placeholder
+        if [ -f ui/icons/xemu_256x256.png ]; then
+          cp ui/icons/xemu_256x256.png AppDir/usr/share/icons/hicolor/256x256/apps/xemu.png
+        else
+          # Generate a minimal placeholder PNG (1x1 white pixel)
+          printf '\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x01\x00\x00\x00\x01\x00\x08\x02\x00\x00\x00\x90wS\xde\x00\x00\x00\x0cIDATx\x9cc\xf8\x0f\x00\x00\x01\x01\x00\x05\x18\xd8N\x00\x00\x00\x00IEND\xaeB`\x82' \
+            > AppDir/usr/share/icons/hicolor/256x256/apps/xemu.png
+        fi
+
+        VERSION="${{ env.VERSION }}" ./linuxdeploy-x86_64.AppImage \
+          --appdir AppDir \
+          --output appimage
+
+        mv xemu*.AppImage dist/
+
+    - name: Report ccache stats
+      run: ccache -s
+
+    - name: Upload AppImage artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ env.ARTIFACT_NAME }}
+        path: dist/xemu*.AppImage
+        compression-level: 0
+        retention-days: 30
