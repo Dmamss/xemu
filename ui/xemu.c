@@ -54,6 +54,8 @@
 #include "hw/xbox/smbus.h" // For eject, drive tray
 #include "hw/xbox/nv2a/nv2a.h"
 #include "ui/xemu-notifications.h"
+#include "xemu-steamdeck.h"
+#include "xemu-scda.h"
 
 #include <stb_image.h>
 #include <locale.h>
@@ -726,6 +728,7 @@ static void process_vblank(struct xemu_console *scon)
     assert(bql_locked());
 
     update_fps();
+    xemu_scda_update();
 
 #if 0
     static uint64_t last_ns = 0;
@@ -955,8 +958,15 @@ static void display_very_early_init(DisplayOptions *o)
      * So make x11 the default SDL video driver if this variable is unset.
      * This is a bit hackish but saves us from bigger problem.
      * Maybe it's a good idea to fix this in SDL instead.
+     *
+     * Exception: do NOT force X11 when running under Gamescope or a native
+     * Wayland session (e.g. Steam Deck Game Mode). Gamescope provides its own
+     * SDL backend and forcing X11 prevents xemu from launching and breaks FSR
+     * upscaling.
      */
-    setenv("SDL_VIDEODRIVER", "x11", 0);
+    if (!getenv("GAMESCOPE_WAYLAND_DISPLAY") && !getenv("WAYLAND_DISPLAY")) {
+        setenv("SDL_VIDEODRIVER", "x11", 0);
+    }
 #endif
 
     if (!SDL_Init(SDL_INIT_VIDEO)) {
@@ -1334,6 +1344,10 @@ int main(int argc, char **argv)
         exit(1);
     }
     atexit(xemu_settings_save);
+
+    if (xemu_is_steam_deck()) {
+        xemu_steamdeck_apply_defaults();
+    }
 
 #ifdef _WIN32
     if (g_config.display.setup_nvidia_profile) {

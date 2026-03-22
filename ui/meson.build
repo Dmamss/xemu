@@ -32,6 +32,8 @@ xemu_ss.add(files(
   'xemu-snapshots.c',
   'xemu-thumbnail.cc',
   'xemu-widescreen.c',
+  'xemu-steamdeck.c',
+  'xemu-scda.c',
 ))
 
 if host_os == 'windows'
