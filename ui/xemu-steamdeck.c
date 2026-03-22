@@ -64,11 +64,16 @@ void xemu_steamdeck_apply_defaults(void)
     g_config.perf.hard_fpu = true;
 
     /*
-     * Audio: disable HRTF (expensive 3D processing not needed for TV/handheld
-     * gaming) and use 4 voice-processing workers matching Zen 2 physical cores.
+     * Audio: disable HRTF (expensive 3D processing) and cap voice-processing
+     * workers to 2. The Steam Deck has 8 logical cores (Zen 2, 4c/8t); auto
+     * detection (num_workers=0) claims all 8 via SDL_GetNumLogicalCPUCores(),
+     * leaving too little headroom for QEMU TCG, NV2A, and Gamescope. 2 workers
+     * balances audio quality vs. emulation CPU budget.
      */
     g_config.audio.hrtf = false;
-    g_config.audio.vp.num_workers = 4;
+    if (g_config.audio.vp.num_workers == 0) {
+        g_config.audio.vp.num_workers = 2;
+    }
 
     /*
      * Display: surface scale must be 1x.
