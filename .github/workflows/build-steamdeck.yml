@@ -40,25 +40,18 @@ jobs:
         mkdir -p ${CCACHE_DIR}
         ccache -z
 
-    - name: Configure
+    - name: Configure & Compile
       run: |
-        # --enable-kvm: compile KVM support into the binary.
-        # GitHub runners have no /dev/kvm, but the binary will use KVM
-        # automatically at runtime on Steam Deck where /dev/kvm is available.
+        # Delegate entirely to build-steamdeck.sh so CI and local builds
+        # always use identical flags (-O3, LTO, AVX2, Zen 2 tuning).
+        # ccache is injected via CC/CXX; AR/RANLIB use the GCC plugin wrappers
+        # required for LTO bitcode preservation.
         export CC="ccache gcc"
         export CXX="ccache g++"
-        export CFLAGS="-O2 -march=znver2 -mtune=znver2"
-
-        ./configure \
-          --extra-cflags="-DXBOX=1 -DXEMU_STEAM_DECK=1 -Wno-error=redundant-decls ${CFLAGS}" \
-          --extra-ldflags="" \
-          --target-list=i386-softmmu \
-          --enable-kvm \
-          --disable-werror
-
-    - name: Compile
-      run: |
-        make -j$(nproc) qemu-system-i386 2>&1 | tee build.log
+        export AR="gcc-ar"
+        export RANLIB="gcc-ranlib"
+        export CCACHE_CPP2=true
+        bash build-steamdeck.sh -j$(nproc)
 
     - name: Package
       run: |

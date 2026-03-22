@@ -63,6 +63,7 @@ set -x
     -Doptimization=3 \
     -Dx86_version=3 \
     -Db_lto=true \
+    -Db_pie=false \
     "$@"
 
 time make -j"${job_count}" qemu-system-i386 2>&1 | tee build-steamdeck.log
