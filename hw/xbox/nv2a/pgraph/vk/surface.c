@@ -608,7 +608,7 @@ static void bind_surface(PGRAPHVkState *r, SurfaceBinding *surface)
         r->zeta_binding = surface;
     }
 
-    r->framebuffer_dirty = true;
+    r->surface_binding_dirty = true;
 }
 
 static void unbind_surface(NV2AState *d, bool color)
@@ -619,12 +619,12 @@ static void unbind_surface(NV2AState *d, bool color)
     if (color) {
         if (r->color_binding) {
             r->color_binding = NULL;
-            r->framebuffer_dirty = true;
+            r->surface_binding_dirty = true;
         }
     } else {
         if (r->zeta_binding) {
             r->zeta_binding = NULL;
-            r->framebuffer_dirty = true;
+            r->surface_binding_dirty = true;
         }
     }
 }
@@ -1725,7 +1725,7 @@ void pgraph_vk_init_surfaces(PGRAPHState *pg)
 
     r->color_binding = NULL;
     r->zeta_binding = NULL;
-    r->framebuffer_dirty = true;
+    r->surface_binding_dirty = true;
 
     pgraph_vk_reload_surface_scale_factor(pg); // FIXME: Move internal
 }

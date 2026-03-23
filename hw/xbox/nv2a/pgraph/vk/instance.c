@@ -160,8 +160,8 @@ static bool create_instance(PGRAPHState *pg, Error **errp)
         vkEnumerateInstanceVersion(&instance_version);
         instance_version = MIN(instance_version, VK_API_VERSION_1_3);
     }
-    if (instance_version < VK_API_VERSION_1_1) {
-        error_setg(errp, "Vulkan 1.1 or higher is required");
+    if (instance_version < VK_API_VERSION_1_3) {
+        error_setg(errp, "Vulkan 1.3 or higher is required");
         return false;
     }
     r->vk_api_version = instance_version;
@@ -331,6 +331,13 @@ static void add_optional_device_extension_names(
     r->memory_budget_extension_enabled = add_extension_if_available(
         available_extensions, enabled_extension_names,
         VK_EXT_MEMORY_BUDGET_EXTENSION_NAME);
+
+    r->has_push_descriptors = add_extension_if_available(
+        available_extensions, enabled_extension_names,
+        VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME);
+    if (r->has_push_descriptors) {
+        fprintf(stderr, "[VK] Push descriptors enabled\n");
+    }
 }
 
 static bool check_device_support_required_extensions(VkPhysicalDevice device)
@@ -354,7 +361,7 @@ static bool is_device_compatible(VkPhysicalDevice device)
 {
     VkPhysicalDeviceProperties props;
     vkGetPhysicalDeviceProperties(device, &props);
-    if (props.apiVersion < VK_API_VERSION_1_1) {
+    if (props.apiVersion < VK_API_VERSION_1_3) {
         return false;
     }
 
@@ -527,6 +534,16 @@ static bool create_logical_device(PGRAPHState *pg, Error **errp)
             .pNext = next_struct,
         };
         next_struct = &custom_border_features;
+    }
+
+    VkPhysicalDeviceDynamicRenderingFeatures dynamic_rendering_features;
+    if (r->vk_api_version >= VK_API_VERSION_1_3) {
+        dynamic_rendering_features = (VkPhysicalDeviceDynamicRenderingFeatures){
+            .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DYNAMIC_RENDERING_FEATURES,
+            .dynamicRendering = VK_TRUE,
+            .pNext = next_struct,
+        };
+        next_struct = &dynamic_rendering_features;
     }
 
     VkDeviceCreateInfo device_create_info = {
