@@ -58,6 +58,25 @@ export SteamDeck=1
 # Falls back silently to PulseAudio if PipeWire is not available.
 export SDL_AUDIODRIVER=pipewire
 
+# --- Zink: OpenGL via Vulkan (RDNA2 optimisation) ---
+# Remplace RadeonSI (driver GL natif AMD) par Zink, qui traduit les appels OpenGL
+# de xemu en commandes Vulkan routées vers RADV. Cela tire parti des optimisations
+# RDNA2 et de l'async shader compilation de RADV tout en conservant le renderer GL
+# de xemu (pgraph/gl/) sans modifier le code de l'émulateur.
+#
+# Note : au premier lancement, tous les shaders seront recompilés (la chaîne
+# GL_VENDOR change → le cache disque existant est automatiquement invalidé).
+# C'est normal ; les runs suivants utilisent le cache Zink/RADV.
+#
+# RADV_PERFTEST=ngg est intentionnellement absent : les geometry shaders utilisés
+# massivement par xemu (pgraph/glsl/geom.c) sont instables sur le chemin NGG
+# de certains titres RDNA2 — Valve les désactive par défaut dans RADV pour la même raison.
+export MESA_LOADER_DRIVER_OVERRIDE=zink
+
+# Forcer RADV (Vulkan open-source de Valve/Mesa) comme backend Vulkan pour Zink.
+# Évite de tomber sur AMDVLK (driver propriétaire AMD) si présent sur le système.
+export AMD_VULKAN_ICD=RADV
+
 CONFIG="$HOME/.var/app/app.xemu.xemu/data/xemu/xemu/xemu.toml"
 BINARY="$HOME/Applications/xemu-steamdeck/xemu"
 
