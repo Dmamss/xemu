@@ -544,6 +544,12 @@ void pgraph_gl_init_shaders(PGRAPHState *pg)
         shader_gl_vendor = (const char *) glGetString(GL_VENDOR);
     }
 
+    /* GL_ARB_parallel_shader_compile: supported since Mesa 19.1.
+     * 0 = let the driver choose the thread count (RadeonSI, Zink, etc.) */
+    if (epoxy_has_gl_extension("GL_ARB_parallel_shader_compile")) {
+        glMaxShaderCompilerThreadsARB(0);
+    }
+
     shader_create_cache_folder();
 
     /* FIXME: Make this configurable */

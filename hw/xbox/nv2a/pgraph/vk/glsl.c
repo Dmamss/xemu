@@ -377,6 +377,17 @@ ShaderModuleInfo *pgraph_vk_create_shader_module_from_glsl(
     return info;
 }
 
+ShaderModuleInfo *pgraph_vk_create_shader_module_from_spirv(
+    PGRAPHVkState *r, GByteArray *spirv)
+{
+    ShaderModuleInfo *info = g_malloc0(sizeof(*info));
+    info->refcnt = 0;
+    info->spirv = spirv; /* takes ownership */
+    info->module = pgraph_vk_create_shader_module_from_spv(r, spirv);
+    init_layout_from_spv(info);
+    return info;
+}
+
 static void finalize_uniform_layout(ShaderUniformLayout *layout)
 {
     for (int i = 0; i < layout->num_uniforms; i++) {

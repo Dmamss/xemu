@@ -1,6 +1,6 @@
 if vulkan.found()
 
-specific_ss.add([volk, libglslang, vma, vulkan, spirv_reflect, 
+specific_ss.add([volk, libglslang, vma, vulkan, spirv_reflect,
 	files(
 		'blit.c',
 		'buffer.c',
@@ -14,6 +14,7 @@ specific_ss.add([volk, libglslang, vma, vulkan, spirv_reflect,
 		'instance.c',
 		'renderer.c',
 		'reports.c',
+		'shader_cache.c',
 		'shaders.c',
 		'surface-compute.c',
 		'surface.c',

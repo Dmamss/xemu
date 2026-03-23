@@ -158,7 +158,7 @@ static bool create_instance(PGRAPHState *pg, Error **errp)
     uint32_t instance_version = VK_API_VERSION_1_0;
     if (vkEnumerateInstanceVersion) {
         vkEnumerateInstanceVersion(&instance_version);
-        instance_version = MIN(instance_version, VK_API_VERSION_1_3);
+        instance_version = MIN(instance_version, VK_API_VERSION_1_4);
     }
     if (instance_version < VK_API_VERSION_1_1) {
         error_setg(errp, "Vulkan 1.1 or higher is required");

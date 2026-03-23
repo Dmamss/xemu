@@ -55,7 +55,6 @@
 #include "hw/xbox/nv2a/nv2a.h"
 #include "ui/xemu-notifications.h"
 #include "xemu-steamdeck.h"
-#include "xemu-scda.h"
 
 #include <stb_image.h>
 #include <locale.h>
@@ -728,7 +727,6 @@ static void process_vblank(struct xemu_console *scon)
     assert(bql_locked());
 
     update_fps();
-    xemu_scda_update();
 
 #if 0
     static uint64_t last_ns = 0;

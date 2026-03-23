@@ -76,26 +76,6 @@ void xemu_steamdeck_apply_defaults(void)
     }
 
     /*
-     * Renderer: OpenGL + Zink par défaut sur Steam Deck (RDNA2).
-     *
-     * Avec MESA_LOADER_DRIVER_OVERRIDE=zink (positionné dans le wrapper
-     * setup-steamdeck.sh), le renderer OpenGL de xemu (pgraph/gl/) passe
-     * par Zink → RADV au lieu de RadeonSI. Cela tire parti des optimisations
-     * RDNA2 et de l'async shader compilation de RADV tout en conservant le
-     * chemin de rendu GL de l'émulateur.
-     *
-     * Le renderer Vulkan natif de xemu (pgraph/vk/) reste disponible dans l'UI
-     * pour les utilisateurs qui souhaitent l'utiliser explicitement.
-     *
-     * Guard : ne remplace la valeur que si elle correspond à l'ancien défaut
-     * Steam Deck (Vulkan), de façon à migrer les configs existantes vers
-     * OpenGL tout en préservant tout choix explicite de l'utilisateur.
-     */
-    if (g_config.display.renderer == CONFIG_DISPLAY_RENDERER_VULKAN) {
-        g_config.display.renderer = CONFIG_DISPLAY_RENDERER_OPENGL;
-    }
-
-    /*
      * Display: surface scale must be 1x.
      * Scale >= 2x triggers rendering artifacts (broken MLAA/AA) on several
      * Xbox titles. Gamescope + FSR handles the upscale to 1280x800.

@@ -21,6 +21,7 @@
 #include "qemu/fast-hash.h"
 #include "qemu/mstring.h"
 #include "renderer.h"
+#include "shader_cache.h"
 
 #define VSH_UBO_BINDING 0
 #define PSH_UBO_BINDING 1
@@ -327,6 +328,16 @@ static void shader_module_cache_entry_init(Lru *lru, LruNode *node,
         container_of(node, ShaderModuleCacheEntry, node);
     memcpy(&module->key, key, sizeof(ShaderModuleCacheKey));
 
+    /* Try to load SPIR-V from disk cache first — skips glslang compilation */
+    GByteArray *cached_spirv = pgraph_vk_spirv_cache_lookup(r, node->hash);
+    if (cached_spirv) {
+        module->module_info = pgraph_vk_create_shader_module_from_spirv(
+            r, cached_spirv);
+        pgraph_vk_ref_shader_module(module->module_info);
+        return;
+    }
+
+    /* Cache miss — generate GLSL, compile to SPIR-V, save to disk */
     MString *code;
 
     switch (module->key.kind) {
@@ -349,8 +360,14 @@ static void shader_module_cache_entry_init(Lru *lru, LruNode *node,
 
     module->module_info = pgraph_vk_create_shader_module_from_glsl(
         r, module->key.kind, mstring_get_str(code));
-    pgraph_vk_ref_shader_module(module->module_info);
     mstring_unref(code);
+
+    /* Persist SPIR-V to disk for next session */
+    if (module->module_info && module->module_info->spirv) {
+        pgraph_vk_spirv_cache_store(r, node->hash, module->module_info->spirv);
+    }
+
+    pgraph_vk_ref_shader_module(module->module_info);
 }
 
 static void shader_module_cache_entry_post_evict(Lru *lru, LruNode *node)
@@ -521,6 +538,7 @@ void pgraph_vk_init_shaders(PGRAPHState *pg)
 {
     PGRAPHVkState *r = pg->vk_renderer_state;
 
+    pgraph_vk_spirv_cache_init();
     pgraph_vk_init_glsl_compiler();
     create_descriptor_pool(pg);
     create_descriptor_set_layout(pg);

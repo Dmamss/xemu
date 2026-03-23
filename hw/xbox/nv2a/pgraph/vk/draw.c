@@ -20,6 +20,7 @@
 #include "qemu/osdep.h"
 #include "qemu/fast-hash.h"
 #include "renderer.h"
+#include "shader_cache.h"
 #include <math.h>
 
 void pgraph_vk_draw_begin(NV2AState *d)
@@ -125,6 +126,9 @@ static void init_pipeline_cache(PGRAPHState *pg)
 {
     PGRAPHVkState *r = pg->vk_renderer_state;
 
+    /* Create an empty pipeline cache first, then try to load from disk.
+     * pgraph_vk_pipeline_cache_load() will replace it if a valid cache
+     * file exists. */
     VkPipelineCacheCreateInfo cache_info = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO,
         .flags = 0,
@@ -134,6 +138,7 @@ static void init_pipeline_cache(PGRAPHState *pg)
     };
     VK_CHECK(vkCreatePipelineCache(r->device, &cache_info, NULL,
                                    &r->vk_pipeline_cache));
+    pgraph_vk_pipeline_cache_load(pg);
 
     const size_t pipeline_cache_size = 2048;
     lru_init(&r->pipeline_cache);
@@ -157,6 +162,7 @@ static void finalize_pipeline_cache(PGRAPHState *pg)
     g_free(r->pipeline_cache_entries);
     r->pipeline_cache_entries = NULL;
 
+    pgraph_vk_pipeline_cache_save(pg);
     vkDestroyPipelineCache(r->device, r->vk_pipeline_cache, NULL);
 }
 
