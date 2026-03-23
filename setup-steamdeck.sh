@@ -53,6 +53,22 @@ cat > "$WRAPPER" << 'WRAPPER_EOF'
 # Tell xemu it's running on Steam Deck (enables platform optimizations)
 export SteamDeck=1
 
+# --- Vulkan: force Mesa RADV (Valve's open-source driver, tuned for Steam Deck) ---
+# Prevents falling back to AMDVLK (AMD proprietary) which has worse frame pacing
+# on the Van Gogh APU.
+export AMD_VULKAN_ICD=RADV
+
+# --- RADV: enable NGG (Next-Gen Geometry) pipeline ---
+# RDNA2 native primitive shader path — fuses vertex+geometry into a single GPU pass.
+# Reduces draw-call overhead for xemu's NV2A Vulkan backend.
+# Stable on RDNA2 in Mesa 23+ (SteamOS 3.x).
+export RADV_PERFTEST=ngg
+
+# --- Audio: use PipeWire directly (SteamOS 3.x native audio server) ---
+# Without this SDL2 routes through the PulseAudio compat layer (~20ms extra latency).
+# Falls back silently to PulseAudio if PipeWire is not available.
+export SDL_AUDIODRIVER=pipewire
+
 CONFIG="$HOME/.var/app/app.xemu.xemu/data/xemu/xemu/xemu.toml"
 BINARY="$HOME/Applications/xemu-steamdeck/xemu"
 
@@ -67,8 +83,24 @@ fi
 _ORIG_GOV=$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 2>/dev/null || echo "")
 if [ -n "$_ORIG_GOV" ] && [ "$_ORIG_GOV" != "performance" ]; then
     echo performance | sudo tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor >/dev/null 2>&1 || true
-    trap 'echo "$_ORIG_GOV" | sudo tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor >/dev/null 2>&1 || true' EXIT
 fi
+
+# Transparent Huge Pages: switch to madvise mode for the duration of the session.
+# QEMU calls madvise(MADV_HUGEPAGE) on guest RAM (64 MB Xbox allocation), so with
+# madvise mode the kernel maps it as 32×2MB huge pages instead of 16384×4KB pages.
+# This reduces KVM TLB pressure and VM-exits for guest memory accesses (~5-10% gain).
+# madvise is safer than "always" — THP only applies where code explicitly requests it.
+_ORIG_THP=$(cat /sys/kernel/mm/transparent_hugepage/enabled 2>/dev/null \
+            | grep -oP '\[\K[^\]]+' || echo "")
+if [ -n "$_ORIG_THP" ] && [ "$_ORIG_THP" != "madvise" ]; then
+    echo madvise | sudo tee /sys/kernel/mm/transparent_hugepage/enabled >/dev/null 2>&1 || true
+fi
+
+# Restore kernel settings on exit (covers both governor and THP).
+trap '
+    [ -n "$_ORIG_GOV" ] && echo "$_ORIG_GOV" | sudo tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor >/dev/null 2>&1 || true
+    [ -n "$_ORIG_THP" ] && echo "$_ORIG_THP" | sudo tee /sys/kernel/mm/transparent_hugepage/enabled >/dev/null 2>&1 || true
+' EXIT
 
 exec "$BINARY" -enable-kvm -config_path "$CONFIG" "$@"
 WRAPPER_EOF
