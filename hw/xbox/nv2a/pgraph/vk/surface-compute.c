@@ -151,6 +151,10 @@ static void create_descriptor_pool(PGRAPHState *pg)
 {
     PGRAPHVkState *r = pg->vk_renderer_state;
 
+    if (r->has_push_descriptors) {
+        return;
+    }
+
     VkDescriptorPoolSize pool_sizes[] = {
         {
             .type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
@@ -173,6 +177,9 @@ static void destroy_descriptor_pool(PGRAPHState *pg)
 {
     PGRAPHVkState *r = pg->vk_renderer_state;
 
+    if (r->has_push_descriptors) {
+        return;
+    }
     vkDestroyDescriptorPool(r->device, r->compute.descriptor_pool, NULL);
     r->compute.descriptor_pool = VK_NULL_HANDLE;
 }
@@ -196,6 +203,8 @@ static void create_descriptor_set_layout(PGRAPHState *pg)
         .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
         .bindingCount = ARRAY_SIZE(bindings),
         .pBindings = bindings,
+        .flags = r->has_push_descriptors ?
+            VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR : 0,
     };
     VK_CHECK(vkCreateDescriptorSetLayout(r->device, &layout_info, NULL,
                                          &r->compute.descriptor_set_layout));
@@ -213,6 +222,10 @@ static void destroy_descriptor_set_layout(PGRAPHState *pg)
 static void create_descriptor_sets(PGRAPHState *pg)
 {
     PGRAPHVkState *r = pg->vk_renderer_state;
+
+    if (r->has_push_descriptors) {
+        return;
+    }
 
     VkDescriptorSetLayout layouts[ARRAY_SIZE(r->compute.descriptor_sets)];
     for (int i = 0; i < ARRAY_SIZE(layouts); i++) {
@@ -232,6 +245,9 @@ static void destroy_descriptor_sets(PGRAPHState *pg)
 {
     PGRAPHVkState *r = pg->vk_renderer_state;
 
+    if (r->has_push_descriptors) {
+        return;
+    }
     vkFreeDescriptorSets(r->device, r->compute.descriptor_pool,
                          ARRAY_SIZE(r->compute.descriptor_sets),
                          r->compute.descriptor_sets);
@@ -291,7 +307,7 @@ static VkPipeline create_compute_pipeline(PGRAPHVkState *r, const char *glsl)
     return pipeline;
 }
 
-static void update_descriptor_sets(PGRAPHState *pg,
+static void update_descriptor_sets(PGRAPHState *pg, VkCommandBuffer cmd,
                                    VkDescriptorBufferInfo *buffers, int count)
 {
     PGRAPHVkState *r = pg->vk_renderer_state;
@@ -299,14 +315,19 @@ static void update_descriptor_sets(PGRAPHState *pg,
     assert(count == 3);
     VkWriteDescriptorSet descriptor_writes[3];
 
-    assert(r->compute.descriptor_set_index <
-           ARRAY_SIZE(r->compute.descriptor_sets));
+    VkDescriptorSet dst_set = r->has_push_descriptors ?
+        VK_NULL_HANDLE :
+        r->compute.descriptor_sets[r->compute.descriptor_set_index];
+
+    if (!r->has_push_descriptors) {
+        assert(r->compute.descriptor_set_index <
+               ARRAY_SIZE(r->compute.descriptor_sets));
+    }
 
     for (int i = 0; i < count; i++) {
         descriptor_writes[i] = (VkWriteDescriptorSet){
             .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-            .dstSet =
-                r->compute.descriptor_sets[r->compute.descriptor_set_index],
+            .dstSet = dst_set,
             .dstBinding = i,
             .dstArrayElement = 0,
             .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
@@ -314,22 +335,31 @@ static void update_descriptor_sets(PGRAPHState *pg,
             .pBufferInfo = &buffers[i],
         };
     }
-    vkUpdateDescriptorSets(r->device, count, descriptor_writes, 0, NULL);
 
-    r->compute.descriptor_set_index += 1;
+    if (r->has_push_descriptors) {
+        vkCmdPushDescriptorSetKHR(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                                  r->compute.pipeline_layout, 0,
+                                  count, descriptor_writes);
+    } else {
+        vkUpdateDescriptorSets(r->device, count, descriptor_writes, 0, NULL);
+        r->compute.descriptor_set_index += 1;
+    }
 }
 
 bool pgraph_vk_compute_needs_finish(PGRAPHVkState *r)
 {
-    bool need_descriptor_write_reset = (r->compute.descriptor_set_index >=
-                                        ARRAY_SIZE(r->compute.descriptor_sets));
-
-    return need_descriptor_write_reset;
+    if (r->has_push_descriptors) {
+        return false;
+    }
+    return r->compute.descriptor_set_index >=
+           ARRAY_SIZE(r->compute.descriptor_sets);
 }
 
 void pgraph_vk_compute_finish_complete(PGRAPHVkState *r)
 {
-    r->compute.descriptor_set_index = 0;
+    if (!r->has_push_descriptors) {
+        r->compute.descriptor_set_index = 0;
+    }
 }
 
 static int get_workgroup_size_for_output_units(PGRAPHVkState *r, int output_units)
@@ -420,11 +450,20 @@ void pgraph_vk_pack_depth_stencil(PGRAPHState *pg, SurfaceBinding *surface,
         },
     };
 
-    update_descriptor_sets(pg, buffers, ARRAY_SIZE(buffers));
-
     size_t output_size_in_units = output_width * output_height;
     ComputePipeline *pipeline = get_compute_pipeline(
         r, surface->host_fmt.vk_format, true, output_size_in_units);
+
+    pgraph_vk_begin_debug_marker(r, cmd, RGBA_PINK, __func__);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline);
+    update_descriptor_sets(pg, cmd, buffers, ARRAY_SIZE(buffers));
+    if (!r->has_push_descriptors) {
+        vkCmdBindDescriptorSets(
+            cmd, VK_PIPELINE_BIND_POINT_COMPUTE, r->compute.pipeline_layout,
+            0, 1,
+            &r->compute.descriptor_sets[r->compute.descriptor_set_index - 1],
+            0, NULL);
+    }
 
     size_t workgroup_size_in_units = pipeline->key.workgroup_size;
     assert(output_size_in_units % workgroup_size_in_units == 0);
@@ -432,15 +471,6 @@ void pgraph_vk_pack_depth_stencil(PGRAPHState *pg, SurfaceBinding *surface,
 
     assert(r->device_props.limits.maxComputeWorkGroupSize[0] >= workgroup_size_in_units);
     assert(r->device_props.limits.maxComputeWorkGroupCount[0] >= group_count);
-
-    // FIXME: Smarter workgroup scaling
-
-    pgraph_vk_begin_debug_marker(r, cmd, RGBA_PINK, __func__);
-    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline);
-    vkCmdBindDescriptorSets(
-        cmd, VK_PIPELINE_BIND_POINT_COMPUTE, r->compute.pipeline_layout, 0, 1,
-        &r->compute.descriptor_sets[r->compute.descriptor_set_index - 1], 0,
-        NULL);
 
     uint32_t push_constants[2] = { input_width, output_width };
     assert(sizeof(push_constants) == 8);
@@ -493,8 +523,6 @@ void pgraph_vk_unpack_depth_stencil(PGRAPHState *pg, SurfaceBinding *surface,
             .range = input_size,
         },
     };
-    update_descriptor_sets(pg, buffers, ARRAY_SIZE(buffers));
-
     size_t output_size_in_units = output_width * output_height;
     ComputePipeline *pipeline = get_compute_pipeline(
         r, surface->host_fmt.vk_format, false, output_size_in_units);
@@ -506,14 +534,16 @@ void pgraph_vk_unpack_depth_stencil(PGRAPHState *pg, SurfaceBinding *surface,
     assert(r->device_props.limits.maxComputeWorkGroupSize[0] >= workgroup_size_in_units);
     assert(r->device_props.limits.maxComputeWorkGroupCount[0] >= group_count);
 
-    // FIXME: Smarter workgroup scaling
-
     pgraph_vk_begin_debug_marker(r, cmd, RGBA_PINK, __func__);
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline);
-    vkCmdBindDescriptorSets(
-        cmd, VK_PIPELINE_BIND_POINT_COMPUTE, r->compute.pipeline_layout, 0, 1,
-        &r->compute.descriptor_sets[r->compute.descriptor_set_index - 1], 0,
-        NULL);
+    update_descriptor_sets(pg, cmd, buffers, ARRAY_SIZE(buffers));
+    if (!r->has_push_descriptors) {
+        vkCmdBindDescriptorSets(
+            cmd, VK_PIPELINE_BIND_POINT_COMPUTE, r->compute.pipeline_layout,
+            0, 1,
+            &r->compute.descriptor_sets[r->compute.descriptor_set_index - 1],
+            0, NULL);
+    }
 
     assert(output_width >= input_width);
     uint32_t push_constants[2] = { input_width, output_width };

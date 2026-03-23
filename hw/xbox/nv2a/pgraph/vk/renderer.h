@@ -56,11 +56,6 @@ typedef struct RenderPassState {
     VkFormat zeta_format;
 } RenderPassState;
 
-typedef struct RenderPass {
-    RenderPassState state;
-    VkRenderPass render_pass;
-} RenderPass;
-
 typedef struct PipelineKey {
     bool clear;
     RenderPassState render_pass_state;
@@ -75,7 +70,6 @@ typedef struct PipelineBinding {
     PipelineKey key;
     VkPipelineLayout layout;
     VkPipeline pipeline;
-    VkRenderPass render_pass;
     unsigned int draw_time;
     bool has_dynamic_line_width;
 } PipelineBinding;
@@ -266,9 +260,6 @@ typedef struct PGRAPHVkDisplayState {
     VkPipelineLayout pipeline_layout;
     VkPipeline pipeline;
 
-    VkRenderPass render_pass;
-    VkFramebuffer framebuffer;
-
     VkImage image;
     VkImageView image_view;
     VkDeviceMemory memory;
@@ -327,6 +318,7 @@ typedef struct PGRAPHVkState {
     bool debug_utils_extension_enabled;
     bool custom_border_color_extension_enabled;
     bool memory_budget_extension_enabled;
+    bool has_push_descriptors;
 
     VkPhysicalDevice physical_device;
     VkPhysicalDeviceFeatures enabled_physical_device_features;
@@ -349,12 +341,7 @@ typedef struct PGRAPHVkState {
     VkCommandBuffer aux_command_buffer;
     bool in_aux_command_buffer;
 
-    VkFramebuffer framebuffers[50];
-    int framebuffer_index;
-    bool framebuffer_dirty;
-
-    VkRenderPass render_pass;
-    GArray *render_passes; // RenderPass
+    bool surface_binding_dirty; // surface bindings changed; end render pass before next draw
     bool in_render_pass;
     bool in_draw;
 
