@@ -644,6 +644,20 @@ static void *shader_write_to_disk(void *arg)
 
     fclose(shader_file);
 
+    /* Append hash to cache list immediately so the next startup can preload
+     * this shader even if xemu is killed before a clean shutdown. The startup
+     * thread reads every hash from this file; duplicate entries are harmless
+     * (lru_lookup is idempotent).  The clean-shutdown path overwrites the
+     * file with the full LRU, so these incremental appends don't accumulate
+     * across sessions. */
+    char *lru_path = shader_get_lru_cache_path();
+    FILE *lru_file = qemu_fopen(lru_path, "ab");
+    if (lru_file) {
+        fwrite(&binding->node.hash, sizeof(uint64_t), 1, lru_file);
+        fclose(lru_file);
+    }
+    g_free(lru_path);
+
     g_free(shader_path);
     g_free(binding->program);
     binding->program = NULL;

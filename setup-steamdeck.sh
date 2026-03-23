@@ -53,17 +53,6 @@ cat > "$WRAPPER" << 'WRAPPER_EOF'
 # Tell xemu it's running on Steam Deck (enables platform optimizations)
 export SteamDeck=1
 
-# --- Vulkan: force Mesa RADV (Valve's open-source driver, tuned for Steam Deck) ---
-# Prevents falling back to AMDVLK (AMD proprietary) which has worse frame pacing
-# on the Van Gogh APU.
-export AMD_VULKAN_ICD=RADV
-
-# --- RADV: enable NGG (Next-Gen Geometry) pipeline ---
-# RDNA2 native primitive shader path — fuses vertex+geometry into a single GPU pass.
-# Reduces draw-call overhead for xemu's NV2A Vulkan backend.
-# Stable on RDNA2 in Mesa 23+ (SteamOS 3.x).
-export RADV_PERFTEST=ngg
-
 # --- Audio: use PipeWire directly (SteamOS 3.x native audio server) ---
 # Without this SDL2 routes through the PulseAudio compat layer (~20ms extra latency).
 # Falls back silently to PulseAudio if PipeWire is not available.
