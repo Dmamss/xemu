@@ -48,6 +48,7 @@
 #include "xemu-snapshots.h"
 #include "xemu-version.h"
 #include "xemu-os-utils.h"
+#include "xemu-steamdeck.h"
 
 #include "data/xemu_64x64.png.h"
 
@@ -955,8 +956,15 @@ static void display_very_early_init(DisplayOptions *o)
      * So make x11 the default SDL video driver if this variable is unset.
      * This is a bit hackish but saves us from bigger problem.
      * Maybe it's a good idea to fix this in SDL instead.
+     *
+     * Exception: do NOT force X11 when running under Gamescope or a native
+     * Wayland session (e.g. Steam Deck Game Mode). Gamescope provides its own
+     * SDL backend and forcing X11 prevents xemu from launching and breaks FSR
+     * upscaling.
      */
-    setenv("SDL_VIDEODRIVER", "x11", 0);
+    if (!getenv("GAMESCOPE_WAYLAND_DISPLAY") && !getenv("WAYLAND_DISPLAY")) {
+        setenv("SDL_VIDEODRIVER", "x11", 0);
+    }
 #endif
 
     if (!SDL_Init(SDL_INIT_VIDEO)) {
@@ -1324,6 +1332,38 @@ int main(int argc, char **argv)
         }
     }
 
+    /*
+     * Auto-enable KVM when /dev/kvm is accessible.
+     * KVM replaces software TCG emulation with hardware virtualisation — the
+     * single largest emulation speed improvement possible on x86 Linux.
+     * We inject -enable-kvm into gArgc/gArgv here, before qemu_init() reads
+     * them in the qemu_main thread.
+     */
+#ifdef __linux__
+    {
+        bool kvm_already_requested = false;
+        for (int i = 1; i < gArgc; i++) {
+            if (gArgv[i] && strcmp(gArgv[i], "-enable-kvm") == 0) {
+                kvm_already_requested = true;
+                break;
+            }
+        }
+        if (!kvm_already_requested && access("/dev/kvm", R_OK | W_OK) == 0) {
+            int new_argc = gArgc + 1;
+            char **new_argv = g_new(char *, new_argc + 1);
+            new_argv[0] = gArgv[0];
+            new_argv[1] = g_strdup("-enable-kvm");
+            for (int i = 1; i < gArgc; i++) {
+                new_argv[i + 1] = gArgv[i];
+            }
+            new_argv[new_argc] = NULL;
+            gArgc = new_argc;
+            gArgv = new_argv;
+            fprintf(stderr, "[xemu] /dev/kvm accessible — enabling KVM acceleration\n");
+        }
+    }
+#endif
+
     if (!xemu_settings_load()) {
         const char *err_msg = xemu_settings_get_error_message();
         fprintf(stderr, "%s", err_msg);
@@ -1334,6 +1374,10 @@ int main(int argc, char **argv)
         exit(1);
     }
     atexit(xemu_settings_save);
+
+    if (xemu_is_steam_deck()) {
+        xemu_steamdeck_apply_defaults();
+    }
 
 #ifdef _WIN32
     if (g_config.display.setup_nvidia_profile) {
