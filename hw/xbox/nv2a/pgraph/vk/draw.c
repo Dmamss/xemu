@@ -400,7 +400,8 @@ static void create_clear_pipeline(PGRAPHState *pg)
             &key.render_pass_state.color_format : NULL,
         .depthAttachmentFormat = r->zeta_binding ?
             key.render_pass_state.zeta_format : VK_FORMAT_UNDEFINED,
-        .stencilAttachmentFormat = r->zeta_binding ?
+        .stencilAttachmentFormat = (r->zeta_binding &&
+            format_has_stencil(key.render_pass_state.zeta_format)) ?
             key.render_pass_state.zeta_format : VK_FORMAT_UNDEFINED,
     };
 
@@ -820,7 +821,8 @@ static void create_pipeline(PGRAPHState *pg)
             &key.render_pass_state.color_format : NULL,
         .depthAttachmentFormat = r->zeta_binding ?
             key.render_pass_state.zeta_format : VK_FORMAT_UNDEFINED,
-        .stencilAttachmentFormat = r->zeta_binding ?
+        .stencilAttachmentFormat = (r->zeta_binding &&
+            format_has_stencil(key.render_pass_state.zeta_format)) ?
             key.render_pass_state.zeta_format : VK_FORMAT_UNDEFINED,
     };
 
@@ -885,7 +887,14 @@ static void bind_descriptor_sets(PGRAPHState *pg)
     PGRAPHVkState *r = pg->vk_renderer_state;
 
     if (r->has_push_descriptors) {
-        return; // vkCmdPushDescriptorSetKHR already called in update_descriptor_sets
+        if (r->push_descriptors_pending) {
+            vkCmdPushDescriptorSetKHR(
+                r->command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                r->pipeline_binding->layout, 0,
+                2 + NV2A_MAX_TEXTURES, r->push_descriptor_writes);
+            r->push_descriptors_pending = false;
+        }
+        return;
     }
 
     assert(r->descriptor_set_index >= 1);
@@ -1001,6 +1010,14 @@ static void flush_memory_buffer(PGRAPHState *pg, VkCommandBuffer cmd)
                          &barrier, 0, NULL);
 }
 
+static bool format_has_stencil(VkFormat fmt)
+{
+    return fmt == VK_FORMAT_D16_UNORM_S8_UINT ||
+           fmt == VK_FORMAT_D24_UNORM_S8_UINT ||
+           fmt == VK_FORMAT_D32_SFLOAT_S8_UINT ||
+           fmt == VK_FORMAT_S8_UINT;
+}
+
 static void begin_render_pass(PGRAPHState *pg)
 {
     PGRAPHVkState *r = pg->vk_renderer_state;
@@ -1032,6 +1049,9 @@ static void begin_render_pass(PGRAPHState *pg)
         .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
     };
 
+    bool has_stencil = r->zeta_binding &&
+        format_has_stencil(r->zeta_binding->host_fmt.vk_format);
+
     VkRenderingInfo rendering_info = {
         .sType = VK_STRUCTURE_TYPE_RENDERING_INFO,
         .renderArea = { .offset = {0, 0},
@@ -1040,7 +1060,7 @@ static void begin_render_pass(PGRAPHState *pg)
         .colorAttachmentCount = r->color_binding ? 1 : 0,
         .pColorAttachments = r->color_binding ? &color_att : NULL,
         .pDepthAttachment = r->zeta_binding ? &depth_att : NULL,
-        .pStencilAttachment = r->zeta_binding ? &depth_att : NULL,
+        .pStencilAttachment = has_stencil ? &depth_att : NULL,
     };
 
     vkCmdBeginRendering(r->command_buffer, &rendering_info);

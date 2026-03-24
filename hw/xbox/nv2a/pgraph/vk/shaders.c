@@ -210,52 +210,78 @@ void pgraph_vk_update_descriptor_sets(PGRAPHState *pg)
         r->uniforms_changed = false;
     }
 
-    VkDescriptorSet dst_set = r->has_push_descriptors ?
-        VK_NULL_HANDLE : r->descriptor_sets[r->descriptor_set_index];
-
-    VkDescriptorBufferInfo ubo_buffer_infos[2];
-    for (int i = 0; i < ARRAY_SIZE(layouts); i++) {
-        ubo_buffer_infos[i] = (VkDescriptorBufferInfo){
-            .buffer = r->storage_buffers[BUFFER_UNIFORM].buffer,
-            .offset = r->uniform_buffer_offsets[i],
-            .range = layouts[i]->total_size,
-        };
-        descriptor_writes[i] = (VkWriteDescriptorSet){
-            .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-            .dstSet = dst_set,
-            .dstBinding = i == 0 ? VSH_UBO_BINDING : PSH_UBO_BINDING,
-            .dstArrayElement = 0,
-            .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
-            .descriptorCount = 1,
-            .pBufferInfo = &ubo_buffer_infos[i],
-        };
-    }
-
-    VkDescriptorImageInfo image_infos[NV2A_MAX_TEXTURES];
-    for (int i = 0; i < NV2A_MAX_TEXTURES; i++) {
-        image_infos[i] = (VkDescriptorImageInfo){
-            .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-            .imageView = r->texture_bindings[i]->image_view,
-            .sampler = r->texture_bindings[i]->sampler,
-        };
-        descriptor_writes[2 + i] = (VkWriteDescriptorSet){
-            .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-            .dstSet = dst_set,
-            .dstBinding = PSH_TEX_BINDING + i,
-            .dstArrayElement = 0,
-            .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-            .descriptorCount = 1,
-            .pImageInfo = &image_infos[i],
-        };
-    }
-
     if (r->has_push_descriptors) {
-        vkCmdPushDescriptorSetKHR(r->command_buffer,
-                                  VK_PIPELINE_BIND_POINT_GRAPHICS,
-                                  r->pipeline_binding->layout, 0,
-                                  ARRAY_SIZE(descriptor_writes),
-                                  descriptor_writes);
+        // Build writes into persistent scratch buffers; bind_descriptor_sets()
+        // will call vkCmdPushDescriptorSetKHR once the command buffer is active
+        for (int i = 0; i < ARRAY_SIZE(layouts); i++) {
+            r->push_ubo_infos[i] = (VkDescriptorBufferInfo){
+                .buffer = r->storage_buffers[BUFFER_UNIFORM].buffer,
+                .offset = r->uniform_buffer_offsets[i],
+                .range = layouts[i]->total_size,
+            };
+            r->push_descriptor_writes[i] = (VkWriteDescriptorSet){
+                .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                .dstSet = VK_NULL_HANDLE,
+                .dstBinding = i == 0 ? VSH_UBO_BINDING : PSH_UBO_BINDING,
+                .dstArrayElement = 0,
+                .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+                .descriptorCount = 1,
+                .pBufferInfo = &r->push_ubo_infos[i],
+            };
+        }
+        for (int i = 0; i < NV2A_MAX_TEXTURES; i++) {
+            r->push_tex_infos[i] = (VkDescriptorImageInfo){
+                .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                .imageView = r->texture_bindings[i]->image_view,
+                .sampler = r->texture_bindings[i]->sampler,
+            };
+            r->push_descriptor_writes[2 + i] = (VkWriteDescriptorSet){
+                .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                .dstSet = VK_NULL_HANDLE,
+                .dstBinding = PSH_TEX_BINDING + i,
+                .dstArrayElement = 0,
+                .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                .descriptorCount = 1,
+                .pImageInfo = &r->push_tex_infos[i],
+            };
+        }
+        r->push_descriptors_pending = true;
     } else {
+        VkDescriptorSet dst_set = r->descriptor_sets[r->descriptor_set_index];
+        VkDescriptorBufferInfo ubo_buffer_infos[2];
+        for (int i = 0; i < ARRAY_SIZE(layouts); i++) {
+            ubo_buffer_infos[i] = (VkDescriptorBufferInfo){
+                .buffer = r->storage_buffers[BUFFER_UNIFORM].buffer,
+                .offset = r->uniform_buffer_offsets[i],
+                .range = layouts[i]->total_size,
+            };
+            descriptor_writes[i] = (VkWriteDescriptorSet){
+                .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                .dstSet = dst_set,
+                .dstBinding = i == 0 ? VSH_UBO_BINDING : PSH_UBO_BINDING,
+                .dstArrayElement = 0,
+                .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+                .descriptorCount = 1,
+                .pBufferInfo = &ubo_buffer_infos[i],
+            };
+        }
+        VkDescriptorImageInfo image_infos[NV2A_MAX_TEXTURES];
+        for (int i = 0; i < NV2A_MAX_TEXTURES; i++) {
+            image_infos[i] = (VkDescriptorImageInfo){
+                .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                .imageView = r->texture_bindings[i]->image_view,
+                .sampler = r->texture_bindings[i]->sampler,
+            };
+            descriptor_writes[2 + i] = (VkWriteDescriptorSet){
+                .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                .dstSet = dst_set,
+                .dstBinding = PSH_TEX_BINDING + i,
+                .dstArrayElement = 0,
+                .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                .descriptorCount = 1,
+                .pImageInfo = &image_infos[i],
+            };
+        }
         vkUpdateDescriptorSets(r->device, ARRAY_SIZE(descriptor_writes),
                                descriptor_writes, 0, NULL);
         r->descriptor_set_index++;
