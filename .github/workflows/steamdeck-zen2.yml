@@ -57,8 +57,8 @@ jobs:
         export AR="gcc-ar"
         export RANLIB="gcc-ranlib"
         export CCACHE_CPP2=true
-        export CFLAGS="-march=znver2 -mtune=znver2 -mprefer-vector-width=256 -fno-semantic-interposition -falign-functions=32 -falign-loops=32 -Dx86_version=3"
-        bash build.sh -j$(nproc)
+        export CFLAGS="-march=znver2 -mtune=znver2 -mprefer-vector-width=256 -fno-semantic-interposition -falign-functions=32 -falign-loops=32"
+        bash build.sh -j$(nproc) -Dx86_version=3
 
     - name: Package
       run: |
