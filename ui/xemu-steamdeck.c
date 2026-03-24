@@ -64,6 +64,15 @@ void xemu_steamdeck_apply_defaults(void)
     g_config.perf.hard_fpu = true;
 
     /*
+     * Use the Vulkan renderer on Steam Deck. The Vulkan path uses dynamic
+     * rendering (Vulkan 1.3 core, no VkRenderPass overhead) and push
+     * descriptors (VK_KHR_push_descriptor, no per-draw descriptor pool
+     * allocation). VkPipelineCache is also persisted to disk, eliminating
+     * SPIR-V→RDNA2 recompilation stutter on every session after the first.
+     */
+    g_config.display.renderer = CONFIG_DISPLAY_RENDERER_VULKAN;
+
+    /*
      * Audio: disable HRTF (expensive 3D processing) and cap voice-processing
      * workers to 2. The Steam Deck has 8 logical cores (Zen 2, 4c/8t); auto
      * detection (num_workers=0) claims all 8 via SDL_GetNumLogicalCPUCores(),
