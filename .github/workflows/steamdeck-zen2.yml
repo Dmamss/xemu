@@ -36,7 +36,7 @@ jobs:
     - name: Install build dependencies
       run: |
         sudo apt-get -qy update
-        sudo apt-get -qy install ccache libfuse2
+        sudo apt-get -qy install ccache libfuse2 libvulkan-dev libvulkan1
         sudo apt-get -qy build-dep .
 
     - name: Setup ccache
