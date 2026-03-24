@@ -112,3 +112,37 @@ void xemu_steamdeck_apply_defaults(void)
             CONFIG_DISPLAY_WINDOW_STARTUP_SIZE_640X480;
     }
 }
+
+void xemu_steamdeck_inject_accel_opts(int *argc, char ***argv)
+{
+    /* Don't override if the user explicitly passed -accel */
+    for (int i = 1; i < *argc; i++) {
+        if ((*argv)[i] && strcmp((*argv)[i], "-accel") == 0) {
+            return;
+        }
+    }
+
+    /*
+     * The Xbox machine is TCG-only: hw/xbox/xbox.c sets max_cpus=1 and
+     * defines no kvm_type callback. Inject -accel tcg,thread=single to:
+     *   - skip MTTCG capability probing entirely (saves startup overhead)
+     *   - guard against any future QEMU default change that might try MTTCG
+     *
+     * Note: tb-size is intentionally left at the QEMU default (1 GiB on
+     * x86-64). The buffer is BSS/demand-paged, so physical RAM usage equals
+     * actual JIT code generated (~5-20 MiB for typical Xbox games) regardless
+     * of the limit — tuning it would have no measurable effect.
+     */
+    int new_argc = *argc + 2;
+    char **new_argv = g_new(char *, new_argc + 1);
+    new_argv[0] = (*argv)[0];
+    new_argv[1] = g_strdup("-accel");
+    new_argv[2] = g_strdup("tcg,thread=single");
+    for (int i = 1; i < *argc; i++) {
+        new_argv[i + 2] = (*argv)[i];
+    }
+    new_argv[new_argc] = NULL;
+    *argc = new_argc;
+    *argv = new_argv;
+    fprintf(stderr, "[SteamDeck] TCG: thread=single\n");
+}

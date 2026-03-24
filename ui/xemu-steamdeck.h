@@ -51,3 +51,10 @@ bool xemu_is_steam_deck(void);
  *   - display.window.startup_size = 640x480  (Xbox native; FSR upscales to 1280x800)
  */
 void xemu_steamdeck_apply_defaults(void);
+
+/*
+ * Injects "-accel tcg,thread=single" into argv before qemu_init().
+ * Call after xemu_steamdeck_apply_defaults() but before the qemu_main
+ * thread is created. No-op if -accel is already present in argv.
+ */
+void xemu_steamdeck_inject_accel_opts(int *argc, char ***argv);
