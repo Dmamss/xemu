@@ -22,6 +22,8 @@
 #include "renderer.h"
 #include <math.h>
 
+static bool format_has_stencil(VkFormat fmt);
+
 void pgraph_vk_draw_begin(NV2AState *d)
 {
     PGRAPHState *pg = &d->pgraph;
