@@ -356,6 +356,13 @@ typedef struct PGRAPHVkState {
     VkDescriptorSet descriptor_sets[1024];
     int descriptor_set_index;
 
+    // Scratch for push descriptor path — populated in update_descriptor_sets,
+    // consumed in bind_descriptor_sets (when command buffer is active)
+    VkDescriptorBufferInfo push_ubo_infos[2];
+    VkDescriptorImageInfo push_tex_infos[NV2A_MAX_TEXTURES];
+    VkWriteDescriptorSet push_descriptor_writes[2 + NV2A_MAX_TEXTURES];
+    bool push_descriptors_pending;
+
     StorageBuffer storage_buffers[BUFFER_COUNT];
 
     MemorySyncRequirement vertex_ram_buffer_syncs[NV2A_VERTEXSHADER_ATTRIBUTES];
