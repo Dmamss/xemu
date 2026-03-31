@@ -20,7 +20,10 @@
 #include "qemu/osdep.h"
 #include "qemu/fast-hash.h"
 #include "renderer.h"
+#include "ui/xemu-settings.h"
 #include <math.h>
+
+static bool format_has_stencil(VkFormat fmt);
 
 void pgraph_vk_draw_begin(NV2AState *d)
 {
@@ -125,15 +128,31 @@ static void init_pipeline_cache(PGRAPHState *pg)
 {
     PGRAPHVkState *r = pg->vk_renderer_state;
 
+    /*
+     * Load previously saved pipeline cache from disk. On AMD RDNA2 (Steam
+     * Deck) each pipeline requires recompiling SPIR-V → RDNA2 ISA, which
+     * causes stutter on first play. Persisting VkPipelineCache eliminates
+     * this on subsequent sessions. vkCreatePipelineCache ignores stale or
+     * incompatible data silently (Vulkan spec §42.2), so this is always safe.
+     */
+    gsize blob_size = 0;
+    gchar *blob_data = NULL;
+    char *cache_path = g_strdup_printf("%svk_pipeline_cache.bin",
+                                       xemu_settings_get_base_path());
+    if (g_file_get_contents(cache_path, &blob_data, &blob_size, NULL)) {
+        fprintf(stderr, "[NV2A] Loaded Vulkan pipeline cache (%zu bytes)\n",
+                (size_t)blob_size);
+    }
+    g_free(cache_path);
+
     VkPipelineCacheCreateInfo cache_info = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO,
-        .flags = 0,
-        .initialDataSize = 0,
-        .pInitialData = NULL,
-        .pNext = NULL,
+        .initialDataSize = (size_t)blob_size,
+        .pInitialData = blob_data,
     };
     VK_CHECK(vkCreatePipelineCache(r->device, &cache_info, NULL,
                                    &r->vk_pipeline_cache));
+    g_free(blob_data);
 
     const size_t pipeline_cache_size = 2048;
     lru_init(&r->pipeline_cache);
@@ -156,6 +175,23 @@ static void finalize_pipeline_cache(PGRAPHState *pg)
     lru_flush(&r->pipeline_cache);
     g_free(r->pipeline_cache_entries);
     r->pipeline_cache_entries = NULL;
+
+    /* Persist compiled pipeline cache to disk for next session */
+    size_t blob_size = 0;
+    VK_CHECK(vkGetPipelineCacheData(r->device, r->vk_pipeline_cache,
+                                    &blob_size, NULL));
+    if (blob_size > 0) {
+        gchar *blob_data = g_malloc(blob_size);
+        VK_CHECK(vkGetPipelineCacheData(r->device, r->vk_pipeline_cache,
+                                        &blob_size, blob_data));
+        char *cache_path = g_strdup_printf("%svk_pipeline_cache.bin",
+                                           xemu_settings_get_base_path());
+        g_file_set_contents(cache_path, blob_data, (gssize)blob_size, NULL);
+        g_free(cache_path);
+        g_free(blob_data);
+        fprintf(stderr, "[NV2A] Saved Vulkan pipeline cache (%zu bytes)\n",
+                blob_size);
+    }
 
     vkDestroyPipelineCache(r->device, r->vk_pipeline_cache, NULL);
 }
@@ -194,28 +230,12 @@ static void finalize_clear_shaders(PGRAPHState *pg)
     pgraph_vk_destroy_shader_module(r, r->solid_frag_module);
 }
 
-static void init_render_passes(PGRAPHVkState *r)
-{
-    r->render_passes = g_array_new(false, false, sizeof(RenderPass));
-}
-
-static void finalize_render_passes(PGRAPHVkState *r)
-{
-    for (int i = 0; i < r->render_passes->len; i++) {
-        RenderPass *p = &g_array_index(r->render_passes, RenderPass, i);
-        vkDestroyRenderPass(r->device, p->render_pass, NULL);
-    }
-    g_array_free(r->render_passes, true);
-    r->render_passes = NULL;
-}
-
 void pgraph_vk_init_pipelines(PGRAPHState *pg)
 {
     PGRAPHVkState *r = pg->vk_renderer_state;
 
     init_pipeline_cache(pg);
     init_clear_shaders(pg);
-    init_render_passes(r);
 
     VkSemaphoreCreateInfo semaphore_info = {
         .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO
@@ -236,7 +256,6 @@ void pgraph_vk_finalize_pipelines(PGRAPHState *pg)
 
     finalize_clear_shaders(pg);
     finalize_pipeline_cache(pg);
-    finalize_render_passes(r);
 
     vkDestroyFence(r->device, r->command_buffer_fence, NULL);
     vkDestroySemaphore(r->device, r->command_buffer_semaphore, NULL);
@@ -251,174 +270,6 @@ static void init_render_pass_state(PGRAPHState *pg, RenderPassState *state)
                               VK_FORMAT_UNDEFINED;
     state->zeta_format = r->zeta_binding ? r->zeta_binding->host_fmt.vk_format :
                                            VK_FORMAT_UNDEFINED;
-}
-
-static VkRenderPass create_render_pass(PGRAPHVkState *r, RenderPassState *state)
-{
-    NV2A_VK_DPRINTF("Creating render pass");
-
-    VkAttachmentDescription attachments[2];
-    int num_attachments = 0;
-
-    bool color = state->color_format != VK_FORMAT_UNDEFINED;
-    bool zeta = state->zeta_format != VK_FORMAT_UNDEFINED;
-
-    VkAttachmentReference color_reference;
-    if (color) {
-        attachments[num_attachments] = (VkAttachmentDescription){
-            .format = state->color_format,
-            .samples = VK_SAMPLE_COUNT_1_BIT,
-            .loadOp = VK_ATTACHMENT_LOAD_OP_LOAD,
-            .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
-            .stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
-            .stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
-            .initialLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-            .finalLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-        };
-        color_reference = (VkAttachmentReference){
-            num_attachments, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL
-        };
-        num_attachments++;
-    }
-
-    VkAttachmentReference depth_reference;
-    if (zeta) {
-        attachments[num_attachments] = (VkAttachmentDescription){
-            .format = state->zeta_format,
-            .samples = VK_SAMPLE_COUNT_1_BIT,
-            .loadOp = VK_ATTACHMENT_LOAD_OP_LOAD,
-            .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
-            .stencilLoadOp = VK_ATTACHMENT_LOAD_OP_LOAD,
-            .stencilStoreOp = VK_ATTACHMENT_STORE_OP_STORE,
-            .initialLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
-            .finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
-        };
-        depth_reference = (VkAttachmentReference){
-            num_attachments, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
-        };
-        num_attachments++;
-    }
-
-    VkSubpassDependency dependency = {
-        .srcSubpass = VK_SUBPASS_EXTERNAL,
-    };
-
-    if (color) {
-        dependency.srcStageMask |=
-            VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-        dependency.srcAccessMask |= VK_ACCESS_COLOR_ATTACHMENT_READ_BIT |
-                                    VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
-        dependency.dstStageMask |=
-            VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-        dependency.dstAccessMask |= VK_ACCESS_COLOR_ATTACHMENT_READ_BIT |
-                                    VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
-    }
-
-    if (zeta) {
-        dependency.srcStageMask |=
-            VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT |
-            VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
-        dependency.srcAccessMask |=
-            VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT |
-            VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
-        dependency.dstStageMask |=
-            VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT |
-            VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
-        dependency.dstAccessMask |=
-            VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT |
-            VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
-    }
-
-    VkSubpassDescription subpass = {
-        .pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS,
-        .colorAttachmentCount = color ? 1 : 0,
-        .pColorAttachments = color ? &color_reference : NULL,
-        .pDepthStencilAttachment = zeta ? &depth_reference : NULL,
-    };
-
-    VkRenderPassCreateInfo renderpass_create_info = {
-        .sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO,
-        .attachmentCount = num_attachments,
-        .pAttachments = attachments,
-        .subpassCount = 1,
-        .pSubpasses = &subpass,
-        .dependencyCount = 1,
-        .pDependencies = &dependency,
-    };
-    VkRenderPass render_pass;
-    VK_CHECK(vkCreateRenderPass(r->device, &renderpass_create_info, NULL,
-                                &render_pass));
-    return render_pass;
-}
-
-static VkRenderPass add_new_render_pass(PGRAPHVkState *r, RenderPassState *state)
-{
-    RenderPass new_pass;
-    memcpy(&new_pass.state, state, sizeof(*state));
-    new_pass.render_pass = create_render_pass(r, state);
-    g_array_append_vals(r->render_passes, &new_pass, 1);
-    return new_pass.render_pass;
-}
-
-static VkRenderPass get_render_pass(PGRAPHVkState *r, RenderPassState *state)
-{
-    for (int i = 0; i < r->render_passes->len; i++) {
-        RenderPass *p = &g_array_index(r->render_passes, RenderPass, i);
-        if (!memcmp(&p->state, state, sizeof(*state))) {
-            return p->render_pass;
-        }
-    }
-    return add_new_render_pass(r, state);
-}
-
-static void create_frame_buffer(PGRAPHState *pg)
-{
-    PGRAPHVkState *r = pg->vk_renderer_state;
-
-    NV2A_VK_DPRINTF("Creating framebuffer");
-
-    assert(r->color_binding || r->zeta_binding);
-
-    if (r->framebuffer_index >= ARRAY_SIZE(r->framebuffers)) {
-        pgraph_vk_finish(pg, VK_FINISH_REASON_NEED_BUFFER_SPACE);
-    }
-
-    VkImageView attachments[2];
-    int attachment_count = 0;
-
-    if (r->color_binding) {
-        attachments[attachment_count++] = r->color_binding->image_view;
-    }
-    if (r->zeta_binding) {
-        attachments[attachment_count++] = r->zeta_binding->image_view;
-    }
-
-    SurfaceBinding *binding = r->color_binding ? : r->zeta_binding;
-
-    VkFramebufferCreateInfo create_info = {
-        .sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO,
-        .renderPass = r->render_pass,
-        .attachmentCount = attachment_count,
-        .pAttachments = attachments,
-        .width = binding->width,
-        .height = binding->height,
-        .layers = 1,
-    };
-    pgraph_apply_scaling_factor(pg, &create_info.width, &create_info.height);
-    VK_CHECK(vkCreateFramebuffer(r->device, &create_info, NULL,
-                                 &r->framebuffers[r->framebuffer_index++]));
-}
-
-static void destroy_framebuffers(PGRAPHState *pg)
-{
-    NV2A_VK_DPRINTF("Destroying framebuffer");
-    PGRAPHVkState *r = pg->vk_renderer_state;
-
-    for (int i = 0; i < r->framebuffer_index; i++) {
-        vkDestroyFramebuffer(r->device, r->framebuffers[i], NULL);
-        r->framebuffers[i] = VK_NULL_HANDLE;
-    }
-    r->framebuffer_index = 0;
 }
 
 static void create_clear_pipeline(PGRAPHState *pg)
@@ -578,8 +429,21 @@ static void create_clear_pipeline(PGRAPHState *pg)
     VK_CHECK(vkCreatePipelineLayout(r->device, &pipeline_layout_info, NULL,
                                     &layout));
 
+    VkPipelineRenderingCreateInfo dyn_rendering = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO,
+        .colorAttachmentCount = r->color_binding ? 1 : 0,
+        .pColorAttachmentFormats = r->color_binding ?
+            &key.render_pass_state.color_format : NULL,
+        .depthAttachmentFormat = r->zeta_binding ?
+            key.render_pass_state.zeta_format : VK_FORMAT_UNDEFINED,
+        .stencilAttachmentFormat = (r->zeta_binding &&
+            format_has_stencil(key.render_pass_state.zeta_format)) ?
+            key.render_pass_state.zeta_format : VK_FORMAT_UNDEFINED,
+    };
+
     VkGraphicsPipelineCreateInfo pipeline_info = {
         .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
+        .pNext = &dyn_rendering,
         .stageCount = num_active_shader_stages,
         .pStages = shader_stages,
         .pVertexInputState = &vertex_input,
@@ -591,7 +455,7 @@ static void create_clear_pipeline(PGRAPHState *pg)
         .pColorBlendState = &color_blending,
         .pDynamicState = &dynamic_state,
         .layout = layout,
-        .renderPass = get_render_pass(r, &key.render_pass_state),
+        .renderPass = VK_NULL_HANDLE,
         .subpass = 0,
         .basePipelineHandle = VK_NULL_HANDLE,
     };
@@ -602,7 +466,6 @@ static void create_clear_pipeline(PGRAPHState *pg)
 
     snode->pipeline = pipeline;
     snode->layout = layout;
-    snode->render_pass = pipeline_info.renderPass;
     snode->draw_time = pg->draw_time;
 
     r->pipeline_binding = snode;
@@ -987,8 +850,21 @@ static void create_pipeline(PGRAPHState *pg)
     VK_CHECK(vkCreatePipelineLayout(r->device, &pipeline_layout_info, NULL,
                                     &layout));
 
+    VkPipelineRenderingCreateInfo dyn_rendering = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO,
+        .colorAttachmentCount = r->color_binding ? 1 : 0,
+        .pColorAttachmentFormats = r->color_binding ?
+            &key.render_pass_state.color_format : NULL,
+        .depthAttachmentFormat = r->zeta_binding ?
+            key.render_pass_state.zeta_format : VK_FORMAT_UNDEFINED,
+        .stencilAttachmentFormat = (r->zeta_binding &&
+            format_has_stencil(key.render_pass_state.zeta_format)) ?
+            key.render_pass_state.zeta_format : VK_FORMAT_UNDEFINED,
+    };
+
     VkGraphicsPipelineCreateInfo pipeline_create_info = {
         .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
+        .pNext = &dyn_rendering,
         .stageCount = num_active_shader_stages,
         .pStages = shader_stages,
         .pVertexInputState = &vertex_input,
@@ -1000,7 +876,7 @@ static void create_pipeline(PGRAPHState *pg)
         .pColorBlendState = &color_blending,
         .pDynamicState = &dynamic_state,
         .layout = layout,
-        .renderPass = get_render_pass(r, &key.render_pass_state),
+        .renderPass = VK_NULL_HANDLE,
         .subpass = 0,
         .basePipelineHandle = VK_NULL_HANDLE,
     };
@@ -1010,7 +886,6 @@ static void create_pipeline(PGRAPHState *pg)
 
     snode->pipeline = pipeline;
     snode->layout = layout;
-    snode->render_pass = pipeline_create_info.renderPass;
     snode->draw_time = pg->draw_time;
 
     r->pipeline_binding = snode;
@@ -1046,8 +921,19 @@ static void push_vertex_attr_values(PGRAPHState *pg)
 static void bind_descriptor_sets(PGRAPHState *pg)
 {
     PGRAPHVkState *r = pg->vk_renderer_state;
-    assert(r->descriptor_set_index >= 1);
 
+    if (r->has_push_descriptors) {
+        if (r->push_descriptors_pending) {
+            vkCmdPushDescriptorSetKHR(
+                r->command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                r->pipeline_binding->layout, 0,
+                2 + NV2A_MAX_TEXTURES, r->push_descriptor_writes);
+            r->push_descriptors_pending = false;
+        }
+        return;
+    }
+
+    assert(r->descriptor_set_index >= 1);
     vkCmdBindDescriptorSets(r->command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
                             r->pipeline_binding->layout, 0, 1,
                             &r->descriptor_sets[r->descriptor_set_index - 1], 0,
@@ -1160,6 +1046,14 @@ static void flush_memory_buffer(PGRAPHState *pg, VkCommandBuffer cmd)
                          &barrier, 0, NULL);
 }
 
+static bool format_has_stencil(VkFormat fmt)
+{
+    return fmt == VK_FORMAT_D16_UNORM_S8_UINT ||
+           fmt == VK_FORMAT_D24_UNORM_S8_UINT ||
+           fmt == VK_FORMAT_D32_SFLOAT_S8_UINT ||
+           fmt == VK_FORMAT_S8_UINT;
+}
+
 static void begin_render_pass(PGRAPHState *pg)
 {
     PGRAPHVkState *r = pg->vk_renderer_state;
@@ -1173,27 +1067,46 @@ static void begin_render_pass(PGRAPHState *pg)
                  vp_height = pg->surface_binding_dim.height;
     pgraph_apply_scaling_factor(pg, &vp_width, &vp_height);
 
-    assert(r->framebuffer_index > 0);
-
-    VkRenderPassBeginInfo render_pass_begin_info = {
-        .sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
-        .renderPass = r->render_pass,
-        .framebuffer = r->framebuffers[r->framebuffer_index - 1],
-        .renderArea.extent.width = vp_width,
-        .renderArea.extent.height = vp_height,
-        .clearValueCount = 0,
-        .pClearValues = NULL,
+    VkRenderingAttachmentInfo color_att = {
+        .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+        .imageView = r->color_binding ? r->color_binding->image_view
+                                      : VK_NULL_HANDLE,
+        .imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+        .loadOp = VK_ATTACHMENT_LOAD_OP_LOAD,
+        .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
     };
-    vkCmdBeginRenderPass(r->command_buffer, &render_pass_begin_info,
-                         VK_SUBPASS_CONTENTS_INLINE);
-    r->in_render_pass = true;
 
+    VkRenderingAttachmentInfo depth_att = {
+        .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+        .imageView = r->zeta_binding ? r->zeta_binding->image_view
+                                     : VK_NULL_HANDLE,
+        .imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+        .loadOp = VK_ATTACHMENT_LOAD_OP_LOAD,
+        .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
+    };
+
+    bool has_stencil = r->zeta_binding &&
+        format_has_stencil(r->zeta_binding->host_fmt.vk_format);
+
+    VkRenderingInfo rendering_info = {
+        .sType = VK_STRUCTURE_TYPE_RENDERING_INFO,
+        .renderArea = { .offset = {0, 0},
+                        .extent = {vp_width, vp_height} },
+        .layerCount = 1,
+        .colorAttachmentCount = r->color_binding ? 1 : 0,
+        .pColorAttachments = r->color_binding ? &color_att : NULL,
+        .pDepthAttachment = r->zeta_binding ? &depth_att : NULL,
+        .pStencilAttachment = has_stencil ? &depth_att : NULL,
+    };
+
+    vkCmdBeginRendering(r->command_buffer, &rendering_info);
+    r->in_render_pass = true;
 }
 
 static void end_render_pass(PGRAPHVkState *r)
 {
     if (r->in_render_pass) {
-        vkCmdEndRenderPass(r->command_buffer);
+        vkCmdEndRendering(r->command_buffer);
         r->in_render_pass = false;
     }
 }
@@ -1280,9 +1193,10 @@ void pgraph_vk_finish(PGRAPHState *pg, FinishReason finish_reason)
         VK_CHECK(vkWaitForFences(r->device, 1, &r->command_buffer_fence,
                                  VK_TRUE, UINT64_MAX));
 
-        r->descriptor_set_index = 0;
+        if (!r->has_push_descriptors) {
+            r->descriptor_set_index = 0;
+        }
         r->in_command_buffer = false;
-        destroy_framebuffers(pg);
 
         if (check_budget) {
             pgraph_vk_check_memory_budget(pg);
@@ -1366,23 +1280,13 @@ static void begin_pre_draw(PGRAPHState *pg)
         create_pipeline(pg);
     }
 
-    bool render_pass_dirty = r->pipeline_binding->render_pass != r->render_pass;
-
-    if (r->framebuffer_dirty || render_pass_dirty) {
+    if (r->surface_binding_dirty) {
         pgraph_vk_ensure_not_in_render_pass(pg);
+        r->surface_binding_dirty = false;
     }
-    if (render_pass_dirty) {
-        r->render_pass = r->pipeline_binding->render_pass;
-    }
-    if (r->framebuffer_dirty) {
-        create_frame_buffer(pg);
-        r->framebuffer_dirty = false;
-    }
+
     if (!pg->clearing) {
         pgraph_vk_update_descriptor_sets(pg);
-    }
-    if (r->framebuffer_index == 0) {
-        create_frame_buffer(pg);
     }
 
     pgraph_vk_ensure_command_buffer(pg);

@@ -32,6 +32,10 @@ static void create_descriptor_pool(PGRAPHState *pg)
 {
     PGRAPHVkState *r = pg->vk_renderer_state;
 
+    if (r->has_push_descriptors) {
+        return; // push descriptors don't use a pool
+    }
+
     size_t num_sets = ARRAY_SIZE(r->descriptor_sets);
 
     VkDescriptorPoolSize pool_sizes[] = {
@@ -60,6 +64,9 @@ static void destroy_descriptor_pool(PGRAPHState *pg)
 {
     PGRAPHVkState *r = pg->vk_renderer_state;
 
+    if (r->has_push_descriptors) {
+        return;
+    }
     vkDestroyDescriptorPool(r->device, r->descriptor_pool, NULL);
     r->descriptor_pool = VK_NULL_HANDLE;
 }
@@ -94,6 +101,8 @@ static void create_descriptor_set_layout(PGRAPHState *pg)
         .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
         .bindingCount = ARRAY_SIZE(bindings),
         .pBindings = bindings,
+        .flags = r->has_push_descriptors ?
+            VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR : 0,
     };
     VK_CHECK(vkCreateDescriptorSetLayout(r->device, &layout_info, NULL,
                                          &r->descriptor_set_layout));
@@ -110,6 +119,10 @@ static void destroy_descriptor_set_layout(PGRAPHState *pg)
 static void create_descriptor_sets(PGRAPHState *pg)
 {
     PGRAPHVkState *r = pg->vk_renderer_state;
+
+    if (r->has_push_descriptors) {
+        return; // push descriptors don't pre-allocate sets
+    }
 
     VkDescriptorSetLayout layouts[ARRAY_SIZE(r->descriptor_sets)];
     for (int i = 0; i < ARRAY_SIZE(layouts); i++) {
@@ -130,6 +143,9 @@ static void destroy_descriptor_sets(PGRAPHState *pg)
 {
     PGRAPHVkState *r = pg->vk_renderer_state;
 
+    if (r->has_push_descriptors) {
+        return;
+    }
     vkFreeDescriptorSets(r->device, r->descriptor_pool,
                          ARRAY_SIZE(r->descriptor_sets), r->descriptor_sets);
     for (int i = 0; i < ARRAY_SIZE(r->descriptor_sets); i++) {
@@ -163,17 +179,24 @@ void pgraph_vk_update_descriptor_sets(PGRAPHState *pg)
                                         ubo_buffer_total_size,
                                         r->device_props.limits.minUniformBufferOffsetAlignment);
 
-    bool need_descriptor_write_reset =
-        (r->descriptor_set_index >= ARRAY_SIZE(r->descriptor_sets));
+    if (!r->has_push_descriptors) {
+        bool need_descriptor_write_reset =
+            (r->descriptor_set_index >= ARRAY_SIZE(r->descriptor_sets));
 
-    if (need_descriptor_write_reset || need_ubo_staging_buffer_reset) {
+        if (need_descriptor_write_reset || need_ubo_staging_buffer_reset) {
+            pgraph_vk_finish(pg, VK_FINISH_REASON_NEED_BUFFER_SPACE);
+            need_uniform_write = true;
+        }
+    } else if (need_ubo_staging_buffer_reset) {
         pgraph_vk_finish(pg, VK_FINISH_REASON_NEED_BUFFER_SPACE);
         need_uniform_write = true;
     }
 
     VkWriteDescriptorSet descriptor_writes[2 + NV2A_MAX_TEXTURES];
 
-    assert(r->descriptor_set_index < ARRAY_SIZE(r->descriptor_sets));
+    if (!r->has_push_descriptors) {
+        assert(r->descriptor_set_index < ARRAY_SIZE(r->descriptor_sets));
+    }
 
     if (need_uniform_write) {
         for (int i = 0; i < ARRAY_SIZE(layouts); i++) {
@@ -187,45 +210,82 @@ void pgraph_vk_update_descriptor_sets(PGRAPHState *pg)
         r->uniforms_changed = false;
     }
 
-    VkDescriptorBufferInfo ubo_buffer_infos[2];
-    for (int i = 0; i < ARRAY_SIZE(layouts); i++) {
-        ubo_buffer_infos[i] = (VkDescriptorBufferInfo){
-            .buffer = r->storage_buffers[BUFFER_UNIFORM].buffer,
-            .offset = r->uniform_buffer_offsets[i],
-            .range = layouts[i]->total_size,
-        };
-        descriptor_writes[i] = (VkWriteDescriptorSet){
-            .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-            .dstSet = r->descriptor_sets[r->descriptor_set_index],
-            .dstBinding = i == 0 ? VSH_UBO_BINDING : PSH_UBO_BINDING,
-            .dstArrayElement = 0,
-            .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
-            .descriptorCount = 1,
-            .pBufferInfo = &ubo_buffer_infos[i],
-        };
+    if (r->has_push_descriptors) {
+        // Build writes into persistent scratch buffers; bind_descriptor_sets()
+        // will call vkCmdPushDescriptorSetKHR once the command buffer is active
+        for (int i = 0; i < ARRAY_SIZE(layouts); i++) {
+            r->push_ubo_infos[i] = (VkDescriptorBufferInfo){
+                .buffer = r->storage_buffers[BUFFER_UNIFORM].buffer,
+                .offset = r->uniform_buffer_offsets[i],
+                .range = layouts[i]->total_size,
+            };
+            r->push_descriptor_writes[i] = (VkWriteDescriptorSet){
+                .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                .dstSet = VK_NULL_HANDLE,
+                .dstBinding = i == 0 ? VSH_UBO_BINDING : PSH_UBO_BINDING,
+                .dstArrayElement = 0,
+                .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+                .descriptorCount = 1,
+                .pBufferInfo = &r->push_ubo_infos[i],
+            };
+        }
+        for (int i = 0; i < NV2A_MAX_TEXTURES; i++) {
+            r->push_tex_infos[i] = (VkDescriptorImageInfo){
+                .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                .imageView = r->texture_bindings[i]->image_view,
+                .sampler = r->texture_bindings[i]->sampler,
+            };
+            r->push_descriptor_writes[2 + i] = (VkWriteDescriptorSet){
+                .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                .dstSet = VK_NULL_HANDLE,
+                .dstBinding = PSH_TEX_BINDING + i,
+                .dstArrayElement = 0,
+                .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                .descriptorCount = 1,
+                .pImageInfo = &r->push_tex_infos[i],
+            };
+        }
+        r->push_descriptors_pending = true;
+    } else {
+        VkDescriptorSet dst_set = r->descriptor_sets[r->descriptor_set_index];
+        VkDescriptorBufferInfo ubo_buffer_infos[2];
+        for (int i = 0; i < ARRAY_SIZE(layouts); i++) {
+            ubo_buffer_infos[i] = (VkDescriptorBufferInfo){
+                .buffer = r->storage_buffers[BUFFER_UNIFORM].buffer,
+                .offset = r->uniform_buffer_offsets[i],
+                .range = layouts[i]->total_size,
+            };
+            descriptor_writes[i] = (VkWriteDescriptorSet){
+                .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                .dstSet = dst_set,
+                .dstBinding = i == 0 ? VSH_UBO_BINDING : PSH_UBO_BINDING,
+                .dstArrayElement = 0,
+                .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+                .descriptorCount = 1,
+                .pBufferInfo = &ubo_buffer_infos[i],
+            };
+        }
+        VkDescriptorImageInfo image_infos[NV2A_MAX_TEXTURES];
+        for (int i = 0; i < NV2A_MAX_TEXTURES; i++) {
+            image_infos[i] = (VkDescriptorImageInfo){
+                .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                .imageView = r->texture_bindings[i]->image_view,
+                .sampler = r->texture_bindings[i]->sampler,
+            };
+            descriptor_writes[2 + i] = (VkWriteDescriptorSet){
+                .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                .dstSet = dst_set,
+                .dstBinding = PSH_TEX_BINDING + i,
+                .dstArrayElement = 0,
+                .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                .descriptorCount = 1,
+                .pImageInfo = &image_infos[i],
+            };
+        }
+        vkUpdateDescriptorSets(r->device, ARRAY_SIZE(descriptor_writes),
+                               descriptor_writes, 0, NULL);
+        r->descriptor_set_index++;
     }
-
-    VkDescriptorImageInfo image_infos[NV2A_MAX_TEXTURES];
-    for (int i = 0; i < NV2A_MAX_TEXTURES; i++) {
-        image_infos[i] = (VkDescriptorImageInfo){
-            .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-            .imageView = r->texture_bindings[i]->image_view,
-            .sampler = r->texture_bindings[i]->sampler,
-        };
-        descriptor_writes[2 + i] = (VkWriteDescriptorSet){
-            .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-            .dstSet = r->descriptor_sets[r->descriptor_set_index],
-            .dstBinding = PSH_TEX_BINDING + i,
-            .dstArrayElement = 0,
-            .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-            .descriptorCount = 1,
-            .pImageInfo = &image_infos[i],
-        };
-    }
-
-    vkUpdateDescriptorSets(r->device, 6, descriptor_writes, 0, NULL);
-
-    r->descriptor_set_index++;
 }
 
 static void update_shader_uniform_locs(ShaderBinding *binding)
@@ -253,6 +313,36 @@ get_and_ref_shader_module_for_key(PGRAPHVkState *r,
     return module->module_info;
 }
 
+typedef struct ShaderStageJob {
+    PGRAPHVkState *r;
+    VkShaderStageFlagBits kind;
+    MString *code;
+    ShaderModuleInfo *result;
+    GMutex mutex;
+    GCond cond;
+    bool done;
+} ShaderStageJob;
+
+static void compile_stage_worker(gpointer data, gpointer user_data)
+{
+    ShaderStageJob *job = (ShaderStageJob *)data;
+    job->result = pgraph_vk_create_shader_module_from_glsl(
+        job->r, job->kind, mstring_get_str(job->code));
+    g_mutex_lock(&job->mutex);
+    job->done = true;
+    g_cond_signal(&job->cond);
+    g_mutex_unlock(&job->mutex);
+}
+
+static void shader_stage_job_wait(ShaderStageJob *job)
+{
+    g_mutex_lock(&job->mutex);
+    while (!job->done) {
+        g_cond_wait(&job->cond, &job->mutex);
+    }
+    g_mutex_unlock(&job->mutex);
+}
+
 static void shader_cache_entry_init(Lru *lru, LruNode *node, const void *state)
 {
     PGRAPHVkState *r = container_of(lru, PGRAPHVkState, shader_cache);
@@ -262,36 +352,119 @@ static void shader_cache_entry_init(Lru *lru, LruNode *node, const void *state)
     NV2A_VK_DPRINTF("cache miss");
     nv2a_profile_inc_counter(NV2A_PROF_SHADER_GEN);
 
-    ShaderModuleCacheKey key;
-
     bool need_geometry_shader = pgraph_glsl_need_geom(&binding->state.geom);
+
+    /* Build all stage keys up-front.
+     * Indices: 0=VSH, 1=PSH, 2=GSH (optional).
+     */
+    ShaderModuleCacheKey keys[3];
+    int num_stages = 2;
+
+    memset(&keys[0], 0, sizeof(keys[0]));
+    keys[0].kind = VK_SHADER_STAGE_VERTEX_BIT;
+    keys[0].vsh.state = binding->state.vsh;
+    keys[0].vsh.glsl_opts.vulkan = true;
+    keys[0].vsh.glsl_opts.prefix_outputs = need_geometry_shader;
+    keys[0].vsh.glsl_opts.use_push_constants_for_uniform_attrs =
+        r->use_push_constants_for_uniform_attrs;
+    keys[0].vsh.glsl_opts.ubo_binding = VSH_UBO_BINDING;
+
+    memset(&keys[1], 0, sizeof(keys[1]));
+    keys[1].kind = VK_SHADER_STAGE_FRAGMENT_BIT;
+    keys[1].psh.state = binding->state.psh;
+    keys[1].psh.glsl_opts.vulkan = true;
+    keys[1].psh.glsl_opts.ubo_binding = PSH_UBO_BINDING;
+    keys[1].psh.glsl_opts.tex_binding = PSH_TEX_BINDING;
+
     if (need_geometry_shader) {
-        memset(&key, 0, sizeof(key));
-        key.kind = VK_SHADER_STAGE_GEOMETRY_BIT;
-        key.geom.state = binding->state.geom;
-        key.geom.glsl_opts.vulkan = true;
-        binding->geom.module_info = get_and_ref_shader_module_for_key(r, &key);
-    } else {
-        binding->geom.module_info = NULL;
+        memset(&keys[2], 0, sizeof(keys[2]));
+        keys[2].kind = VK_SHADER_STAGE_GEOMETRY_BIT;
+        keys[2].geom.state = binding->state.geom;
+        keys[2].geom.glsl_opts.vulkan = true;
+        num_stages = 3;
     }
 
-    memset(&key, 0, sizeof(key));
-    key.kind = VK_SHADER_STAGE_VERTEX_BIT;
-    key.vsh.state = binding->state.vsh;
-    key.vsh.glsl_opts.vulkan = true;
-    key.vsh.glsl_opts.prefix_outputs = need_geometry_shader;
-    key.vsh.glsl_opts.use_push_constants_for_uniform_attrs =
-        r->use_push_constants_for_uniform_attrs;
-    key.vsh.glsl_opts.ubo_binding = VSH_UBO_BINDING;
-    binding->vsh.module_info = get_and_ref_shader_module_for_key(r, &key);
+    /*
+     * For each stage: check the module cache.  On a hit we just bump the
+     * ref-count (fast path, single-threaded).  On a miss we reserve an LRU
+     * slot, generate GLSL (fast), then push the SPIR-V compilation to the
+     * thread pool so all misses overlap in time.
+     */
+    ShaderStageJob      jobs[3]     = {0};
+    ShaderModuleCacheEntry *reserved[3] = {NULL, NULL, NULL};
+    ShaderModuleInfo   *cached[3]   = {NULL, NULL, NULL};
 
-    memset(&key, 0, sizeof(key));
-    key.kind = VK_SHADER_STAGE_FRAGMENT_BIT;
-    key.psh.state = binding->state.psh;
-    key.psh.glsl_opts.vulkan = true;
-    key.psh.glsl_opts.ubo_binding = PSH_UBO_BINDING;
-    key.psh.glsl_opts.tex_binding = PSH_TEX_BINDING;
-    binding->psh.module_info = get_and_ref_shader_module_for_key(r, &key);
+    for (int i = 0; i < num_stages; i++) {
+        uint64_t hash =
+            fast_hash((void *)&keys[i], sizeof(ShaderModuleCacheKey));
+        LruNode *existing =
+            lru_lookup_existing(&r->shader_module_cache, hash, &keys[i]);
+
+        if (existing) {
+            /* Cache hit — ref for the binding and we're done. */
+            ShaderModuleCacheEntry *entry =
+                container_of(existing, ShaderModuleCacheEntry, node);
+            pgraph_vk_ref_shader_module(entry->module_info);
+            cached[i] = entry->module_info;
+        } else {
+            /* Cache miss — reserve slot, generate GLSL, submit to pool. */
+            LruNode *resv = lru_reserve(&r->shader_module_cache, hash);
+            reserved[i] = container_of(resv, ShaderModuleCacheEntry, node);
+            reserved[i]->module_info = NULL;
+            memcpy(&reserved[i]->key, &keys[i], sizeof(ShaderModuleCacheKey));
+
+            MString *code;
+            switch (keys[i].kind) {
+            case VK_SHADER_STAGE_VERTEX_BIT:
+                code = pgraph_glsl_gen_vsh(&keys[i].vsh.state,
+                                           keys[i].vsh.glsl_opts);
+                break;
+            case VK_SHADER_STAGE_GEOMETRY_BIT:
+                code = pgraph_glsl_gen_geom(&keys[i].geom.state,
+                                            keys[i].geom.glsl_opts);
+                break;
+            case VK_SHADER_STAGE_FRAGMENT_BIT:
+                code = pgraph_glsl_gen_psh(&keys[i].psh.state,
+                                           keys[i].psh.glsl_opts);
+                break;
+            default:
+                assert(!"unexpected shader stage");
+                code = NULL;
+            }
+
+            jobs[i].r    = r;
+            jobs[i].kind = keys[i].kind;
+            jobs[i].code = code;
+            jobs[i].done = false;
+            g_mutex_init(&jobs[i].mutex);
+            g_cond_init(&jobs[i].cond);
+
+            g_thread_pool_push(r->shader_compile_pool, &jobs[i], NULL);
+        }
+    }
+
+    /* Collect results from compile workers and fill reserved LRU slots. */
+    for (int i = 0; i < num_stages; i++) {
+        if (!reserved[i]) {
+            continue;
+        }
+        shader_stage_job_wait(&jobs[i]);
+
+        reserved[i]->module_info = jobs[i].result;
+        /* One ref owned by the module cache slot (mirrors shader_module_cache_entry_init). */
+        pgraph_vk_ref_shader_module(reserved[i]->module_info);
+        /* One ref owned by the binding (mirrors get_and_ref_shader_module_for_key). */
+        pgraph_vk_ref_shader_module(reserved[i]->module_info);
+        cached[i] = reserved[i]->module_info;
+
+        mstring_unref(jobs[i].code);
+        g_cond_clear(&jobs[i].cond);
+        g_mutex_clear(&jobs[i].mutex);
+    }
+
+    binding->vsh.module_info  = cached[0];
+    binding->psh.module_info  = cached[1];
+    binding->geom.module_info = need_geometry_shader ? cached[2] : NULL;
 
     update_shader_uniform_locs(binding);
 }
@@ -530,10 +703,30 @@ void pgraph_vk_init_shaders(PGRAPHState *pg)
     r->use_push_constants_for_uniform_attrs =
         (r->device_props.limits.maxPushConstantsSize >=
          MAX_UNIFORM_ATTR_VALUES_SIZE);
+
+    /*
+     * Parallel shader-stage compilation pool.
+     * We need at most 3 workers (VSH + PSH + GSH) per binding miss.
+     * Leave at least one CPU core free for the QEMU main / TCG thread.
+     */
+    int nthreads = MIN((int)g_get_num_processors() - 1, 3);
+    if (nthreads < 1) {
+        nthreads = 1;
+    }
+    r->shader_compile_pool =
+        g_thread_pool_new(compile_stage_worker, NULL, nthreads, TRUE, NULL);
 }
 
 void pgraph_vk_finalize_shaders(PGRAPHState *pg)
 {
+    PGRAPHVkState *r = pg->vk_renderer_state;
+
+    /* Wait for all in-flight compile jobs before tearing down the caches. */
+    if (r->shader_compile_pool) {
+        g_thread_pool_free(r->shader_compile_pool, FALSE, TRUE);
+        r->shader_compile_pool = NULL;
+    }
+
     shader_cache_finalize(pg);
     destroy_descriptor_sets(pg);
     destroy_descriptor_set_layout(pg);

@@ -95,7 +95,7 @@ static VkPipeline create_test_pipeline(
     NV2AState *d, VkPrimitiveTopology primitive_topology,
     VkShaderModule vert_shader_module, VkShaderModule geom_shader_module,
     VkShaderModule frag_shader_module, VkPipelineLayout pipeline_layout,
-    VkRenderPass render_pass, int width, int height)
+    int width, int height)
 {
     PGRAPHState *pg = &d->pgraph;
     PGRAPHVkState *r = pg->vk_renderer_state;
@@ -186,8 +186,16 @@ static VkPipeline create_test_pipeline(
         .blendConstants = { 0.0f, 0.0f, 0.0f, 0.0f },
     };
 
+    VkFormat probe_fmt = VK_FORMAT_R8G8B8A8_UNORM;
+    VkPipelineRenderingCreateInfo dyn_rendering = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO,
+        .colorAttachmentCount = 1,
+        .pColorAttachmentFormats = &probe_fmt,
+    };
+
     VkGraphicsPipelineCreateInfo pipeline_info = {
         .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
+        .pNext = &dyn_rendering,
         .stageCount = ARRAY_SIZE(shader_stages),
         .pStages = shader_stages,
         .pVertexInputState = &vertex_input_info,
@@ -197,7 +205,7 @@ static VkPipeline create_test_pipeline(
         .pMultisampleState = &multisampling,
         .pColorBlendState = &color_blending,
         .layout = pipeline_layout,
-        .renderPass = render_pass,
+        .renderPass = VK_NULL_HANDLE,
         .subpass = 0,
         .basePipelineHandle = VK_NULL_HANDLE,
     };
@@ -300,50 +308,6 @@ static uint8_t *render_geom_shader_triangles(NV2AState *d, int width,
     VK_CHECK(vkBindBufferMemory(r->device, cpu_buffer, cpu_buffer_memory, 0));
 
 
-    VkAttachmentDescription color_attachment = {
-        .format = VK_FORMAT_R8G8B8A8_UNORM,
-        .samples = VK_SAMPLE_COUNT_1_BIT,
-        .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
-        .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
-        .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
-        .finalLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-    };
-
-    VkAttachmentReference color_ref = {
-        0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL
-    };
-
-    VkSubpassDescription subpass = {
-        .pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS,
-        .colorAttachmentCount = 1,
-        .pColorAttachments = &color_ref,
-    };
-
-    VkRenderPassCreateInfo render_pass_info = {
-        .sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO,
-        .attachmentCount = 1,
-        .pAttachments = &color_attachment,
-        .subpassCount = 1,
-        .pSubpasses = &subpass,
-    };
-
-    VkRenderPass render_pass;
-    VK_CHECK(
-        vkCreateRenderPass(r->device, &render_pass_info, NULL, &render_pass));
-
-    VkFramebufferCreateInfo fb_info = {
-        .sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO,
-        .renderPass = render_pass,
-        .attachmentCount = 1,
-        .pAttachments = &offscreen_image_view,
-        .width = width,
-        .height = height,
-        .layers = 1,
-    };
-
-    VkFramebuffer framebuffer;
-    VK_CHECK(vkCreateFramebuffer(r->device, &fb_info, NULL, &framebuffer));
-
     ShaderModuleInfo *vsh_info = pgraph_vk_create_shader_module_from_glsl(
         r, VK_SHADER_STAGE_VERTEX_BIT, vertex_shader_source);
     ShaderModuleInfo *geom_info = pgraph_vk_create_shader_module_from_glsl(
@@ -367,17 +331,17 @@ static uint8_t *render_geom_shader_triangles(NV2AState *d, int width,
 
     VkPipeline tri_pipeline = create_test_pipeline(
         d, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, vert_shader_module,
-        geom_shader_module, frag_shader_module, pipeline_layout, render_pass,
+        geom_shader_module, frag_shader_module, pipeline_layout,
         width, height);
 
     VkPipeline strip_pipeline = create_test_pipeline(
         d, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP, vert_shader_module,
-        geom_shader_module, frag_shader_module, pipeline_layout, render_pass,
+        geom_shader_module, frag_shader_module, pipeline_layout,
         width, height);
 
     VkPipeline fan_pipeline = create_test_pipeline(
         d, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN, vert_shader_module,
-        geom_shader_module, frag_shader_module, pipeline_layout, render_pass,
+        geom_shader_module, frag_shader_module, pipeline_layout,
         width, height);
 
     pgraph_vk_destroy_shader_module(r, psh_info);
@@ -389,22 +353,33 @@ static uint8_t *render_geom_shader_triangles(NV2AState *d, int width,
     };
     VK_CHECK(vkBeginCommandBuffer(r->command_buffer, &begin_info));
 
-    // Begin render pass
+    // Transition offscreen image from UNDEFINED to COLOR_ATTACHMENT_OPTIMAL
+    pgraph_vk_transition_image_layout(pg, r->command_buffer, offscreen_image,
+                                      VK_FORMAT_R8G8B8A8_UNORM,
+                                      VK_IMAGE_LAYOUT_UNDEFINED,
+                                      VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+
+    // Begin dynamic rendering
     VkClearValue clear_color = {
         .color.float32 = { 0.0f, 0.0f, 0.0f, 1.0f },
     };
-    VkRenderPassBeginInfo rp_begin = {
-        .sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
-        .renderPass = render_pass,
-        .framebuffer = framebuffer,
-        .renderArea.extent.width = width,
-        .renderArea.extent.height = height,
-        .clearValueCount = 1,
-        .pClearValues = &clear_color,
+    VkRenderingAttachmentInfo color_att = {
+        .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+        .imageView = offscreen_image_view,
+        .imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+        .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
+        .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
+        .clearValue = clear_color,
     };
-
-    vkCmdBeginRenderPass(r->command_buffer, &rp_begin,
-                         VK_SUBPASS_CONTENTS_INLINE);
+    VkRenderingInfo rendering_info = {
+        .sType = VK_STRUCTURE_TYPE_RENDERING_INFO,
+        .renderArea = { .offset = {0, 0},
+                        .extent = {width, height} },
+        .layerCount = 1,
+        .colorAttachmentCount = 1,
+        .pColorAttachments = &color_att,
+    };
+    vkCmdBeginRendering(r->command_buffer, &rendering_info);
 
     vkCmdBindPipeline(r->command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
                       tri_pipeline);
@@ -416,7 +391,7 @@ static uint8_t *render_geom_shader_triangles(NV2AState *d, int width,
                       fan_pipeline);
     vkCmdDraw(r->command_buffer, 4, 1, 7, 0);
 
-    vkCmdEndRenderPass(r->command_buffer);
+    vkCmdEndRendering(r->command_buffer);
 
     // Synchronize and transition framebuffer for copying to CPU
     pgraph_vk_transition_image_layout(pg, r->command_buffer, offscreen_image,
@@ -466,8 +441,6 @@ static uint8_t *render_geom_shader_triangles(NV2AState *d, int width,
     vkDestroyPipeline(r->device, fan_pipeline, NULL);
     vkDestroyPipeline(r->device, tri_pipeline, NULL);
     vkDestroyPipelineLayout(r->device, pipeline_layout, NULL);
-    vkDestroyFramebuffer(r->device, framebuffer, NULL);
-    vkDestroyRenderPass(r->device, render_pass, NULL);
     vkDestroyImageView(r->device, offscreen_image_view, NULL);
     vkDestroyBuffer(r->device, cpu_buffer, NULL);
     vkFreeMemory(r->device, cpu_buffer_memory, NULL);

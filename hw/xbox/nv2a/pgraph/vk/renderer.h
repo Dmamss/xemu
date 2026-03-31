@@ -56,11 +56,6 @@ typedef struct RenderPassState {
     VkFormat zeta_format;
 } RenderPassState;
 
-typedef struct RenderPass {
-    RenderPassState state;
-    VkRenderPass render_pass;
-} RenderPass;
-
 typedef struct PipelineKey {
     bool clear;
     RenderPassState render_pass_state;
@@ -75,7 +70,6 @@ typedef struct PipelineBinding {
     PipelineKey key;
     VkPipelineLayout layout;
     VkPipeline pipeline;
-    VkRenderPass render_pass;
     unsigned int draw_time;
     bool has_dynamic_line_width;
 } PipelineBinding;
@@ -266,9 +260,6 @@ typedef struct PGRAPHVkDisplayState {
     VkPipelineLayout pipeline_layout;
     VkPipeline pipeline;
 
-    VkRenderPass render_pass;
-    VkFramebuffer framebuffer;
-
     VkImage image;
     VkImageView image_view;
     VkDeviceMemory memory;
@@ -327,6 +318,7 @@ typedef struct PGRAPHVkState {
     bool debug_utils_extension_enabled;
     bool custom_border_color_extension_enabled;
     bool memory_budget_extension_enabled;
+    bool has_push_descriptors;
 
     VkPhysicalDevice physical_device;
     VkPhysicalDeviceFeatures enabled_physical_device_features;
@@ -349,12 +341,7 @@ typedef struct PGRAPHVkState {
     VkCommandBuffer aux_command_buffer;
     bool in_aux_command_buffer;
 
-    VkFramebuffer framebuffers[50];
-    int framebuffer_index;
-    bool framebuffer_dirty;
-
-    VkRenderPass render_pass;
-    GArray *render_passes; // RenderPass
+    bool surface_binding_dirty; // surface bindings changed; end render pass before next draw
     bool in_render_pass;
     bool in_draw;
 
@@ -368,6 +355,13 @@ typedef struct PGRAPHVkState {
     VkDescriptorSetLayout descriptor_set_layout;
     VkDescriptorSet descriptor_sets[1024];
     int descriptor_set_index;
+
+    // Scratch for push descriptor path — populated in update_descriptor_sets,
+    // consumed in bind_descriptor_sets (when command buffer is active)
+    VkDescriptorBufferInfo push_ubo_infos[2];
+    VkDescriptorImageInfo push_tex_infos[NV2A_MAX_TEXTURES];
+    VkWriteDescriptorSet push_descriptor_writes[2 + NV2A_MAX_TEXTURES];
+    bool push_descriptors_pending;
 
     StorageBuffer storage_buffers[BUFFER_COUNT];
 
@@ -408,6 +402,7 @@ typedef struct PGRAPHVkState {
 
     Lru shader_module_cache;
     ShaderModuleCacheEntry *shader_module_cache_entries;
+    GThreadPool *shader_compile_pool;
 
     // FIXME: Merge these into a structure
     uint64_t uniform_buffer_hashes[2];

@@ -312,63 +312,6 @@ static void create_descriptor_sets(PGRAPHState *pg)
                                       &r->display.descriptor_set));
 }
 
-static void create_render_pass(PGRAPHState *pg)
-{
-    PGRAPHVkState *r = pg->vk_renderer_state;
-
-    VkAttachmentDescription attachment;
-
-    VkAttachmentReference color_reference;
-    attachment = (VkAttachmentDescription){
-        .format = VK_FORMAT_R8G8B8A8_UNORM,
-        .samples = VK_SAMPLE_COUNT_1_BIT,
-        .loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
-        .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
-        .stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
-        .stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
-        .initialLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-        .finalLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-    };
-    color_reference = (VkAttachmentReference){
-        0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL
-    };
-
-    VkSubpassDependency dependency = {
-        .srcSubpass = VK_SUBPASS_EXTERNAL,
-    };
-
-    dependency.srcStageMask |=
-        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-    dependency.dstStageMask |=
-        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-    dependency.dstAccessMask |= VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
-
-    VkSubpassDescription subpass = {
-        .pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS,
-        .colorAttachmentCount = 1,
-        .pColorAttachments = &color_reference,
-    };
-
-    VkRenderPassCreateInfo renderpass_create_info = {
-        .sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO,
-        .attachmentCount = 1,
-        .pAttachments = &attachment,
-        .subpassCount = 1,
-        .pSubpasses = &subpass,
-        .dependencyCount = 1,
-        .pDependencies = &dependency,
-    };
-    VK_CHECK(vkCreateRenderPass(r->device, &renderpass_create_info, NULL,
-                                &r->display.render_pass));
-}
-
-static void destroy_render_pass(PGRAPHState *pg)
-{
-    PGRAPHVkState *r = pg->vk_renderer_state;
-    vkDestroyRenderPass(r->device, r->display.render_pass, NULL);
-    r->display.render_pass = VK_NULL_HANDLE;
-}
-
 static void create_display_pipeline(PGRAPHState *pg)
 {
     PGRAPHVkState *r = pg->vk_renderer_state;
@@ -470,8 +413,16 @@ static void create_display_pipeline(PGRAPHState *pg)
     VK_CHECK(vkCreatePipelineLayout(r->device, &pipeline_layout_info, NULL,
                                     &r->display.pipeline_layout));
 
+    VkFormat display_fmt = VK_FORMAT_R8G8B8A8_UNORM;
+    VkPipelineRenderingCreateInfo dyn_rendering = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO,
+        .colorAttachmentCount = 1,
+        .pColorAttachmentFormats = &display_fmt,
+    };
+
     VkGraphicsPipelineCreateInfo pipeline_info = {
         .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
+        .pNext = &dyn_rendering,
         .stageCount = ARRAY_SIZE(shader_stages),
         .pStages = shader_stages,
         .pVertexInputState = &vertex_input,
@@ -479,11 +430,11 @@ static void create_display_pipeline(PGRAPHState *pg)
         .pViewportState = &viewport_state,
         .pRasterizationState = &rasterizer,
         .pMultisampleState = &multisampling,
-        .pDepthStencilState = r->zeta_binding ? &depth_stencil : NULL,
+        .pDepthStencilState = NULL,
         .pColorBlendState = &color_blending,
         .pDynamicState = &dynamic_state,
         .layout = r->display.pipeline_layout,
-        .renderPass = r->display.render_pass,
+        .renderPass = VK_NULL_HANDLE,
         .subpass = 0,
         .basePipelineHandle = VK_NULL_HANDLE,
     };
@@ -506,30 +457,6 @@ static void destroy_display_pipeline(PGRAPHState *pg)
     r->display.display_frag = NULL;
 }
 
-static void create_frame_buffer(PGRAPHState *pg)
-{
-    PGRAPHVkState *r = pg->vk_renderer_state;
-
-    VkFramebufferCreateInfo create_info = {
-        .sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO,
-        .renderPass = r->display.render_pass,
-        .attachmentCount = 1,
-        .pAttachments = &r->display.image_view,
-        .width = r->display.width,
-        .height = r->display.height,
-        .layers = 1,
-    };
-    VK_CHECK(vkCreateFramebuffer(r->device, &create_info, NULL,
-                                 &r->display.framebuffer));
-}
-
-static void destroy_frame_buffer(PGRAPHState *pg)
-{
-    PGRAPHVkState *r = pg->vk_renderer_state;
-    vkDestroyFramebuffer(r->device, r->display.framebuffer, NULL);
-    r->display.framebuffer = NULL;
-}
-
 static void destroy_current_display_image(PGRAPHState *pg)
 {
     PGRAPHVkState *r = pg->vk_renderer_state;
@@ -538,8 +465,6 @@ static void destroy_current_display_image(PGRAPHState *pg)
     if (d->image == VK_NULL_HANDLE) {
         return;
     }
-
-    destroy_frame_buffer(pg);
 
 #if HAVE_EXTERNAL_MEMORY
     glDeleteTextures(1, &d->gl_texture_id);
@@ -717,8 +642,6 @@ static void create_display_image(PGRAPHState *pg, int width, int height)
 
     d->width = image_create_info.extent.width;
     d->height = image_create_info.extent.height;
-
-    create_frame_buffer(pg);
 }
 
 static void update_descriptor_set(PGRAPHState *pg, SurfaceBinding *surface)
@@ -928,15 +851,22 @@ static void render_display(PGRAPHState *pg, SurfaceBinding *surface)
         pg, cmd, disp->image, VK_FORMAT_R8G8B8A8_UNORM,
         VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
 
-    VkRenderPassBeginInfo render_pass_begin_info = {
-        .sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
-        .renderPass = disp->render_pass,
-        .framebuffer = disp->framebuffer,
-        .renderArea.extent.width = disp->width,
-        .renderArea.extent.height = disp->height,
+    VkRenderingAttachmentInfo color_att = {
+        .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+        .imageView = disp->image_view,
+        .imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+        .loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+        .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
     };
-    vkCmdBeginRenderPass(cmd, &render_pass_begin_info,
-                         VK_SUBPASS_CONTENTS_INLINE);
+    VkRenderingInfo rendering_info = {
+        .sType = VK_STRUCTURE_TYPE_RENDERING_INFO,
+        .renderArea = { .offset = {0, 0},
+                        .extent = {disp->width, disp->height} },
+        .layerCount = 1,
+        .colorAttachmentCount = 1,
+        .pColorAttachments = &color_att,
+    };
+    vkCmdBeginRendering(cmd, &rendering_info);
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
                       disp->pipeline);
 
@@ -964,7 +894,7 @@ static void render_display(PGRAPHState *pg, SurfaceBinding *surface)
 
     vkCmdDraw(cmd, 3, 1, 0, 0);
 
-    vkCmdEndRenderPass(cmd);
+    vkCmdEndRendering(cmd);
 
 #if 0
     VkImageCopy region = {
@@ -1037,7 +967,6 @@ void pgraph_vk_init_display(PGRAPHState *pg)
     create_descriptor_pool(pg);
     create_descriptor_set_layout(pg);
     create_descriptor_sets(pg);
-    create_render_pass(pg);
     create_display_pipeline(pg);
     create_surface_sampler(pg);
 }
@@ -1054,7 +983,6 @@ void pgraph_vk_finalize_display(PGRAPHState *pg)
 
     destroy_surface_sampler(pg);
     destroy_display_pipeline(pg);
-    destroy_render_pass(pg);
     destroy_descriptor_set_layout(pg);
     destroy_descriptor_pool(pg);
 }

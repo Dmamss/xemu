@@ -1,0 +1,111 @@
+name: Steam Deck Zen 2 Build
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - claude/steam-deck-zen2-build-Ho7Bp
+
+concurrency:
+  group: steamdeck-zen2-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build xemu Steam Deck Zen 2 (x86_64)
+    runs-on: ubuntu-22.04
+
+    env:
+      ARTIFACT_NAME: xemu-steamdeck-zen2
+      CCACHE_DIR: /tmp/xemu-ccache
+      CCACHE_MAXSIZE: 512M
+
+    steps:
+    - name: Checkout source (with submodules)
+      uses: actions/checkout@v5
+      with:
+        submodules: recursive
+
+    - name: Cache ccache
+      uses: actions/cache@v5
+      with:
+        path: ${{ env.CCACHE_DIR }}
+        key: steamdeck-zen2-ccache-${{ github.sha }}
+        restore-keys: steamdeck-zen2-ccache-
+
+    - name: Install build dependencies
+      run: |
+        sudo apt-get -qy update
+        sudo apt-get -qy install ccache libfuse2 libvulkan-dev libvulkan1
+        sudo apt-get -qy build-dep .
+
+    - name: Setup ccache
+      run: |
+        mkdir -p ${CCACHE_DIR}
+        ccache -z
+
+    - name: Configure & Compile
+      run: |
+        # Inject ccache and Zen 2 flags.
+        # -march=znver2/-mtune=znver2   : target AMD Van Gogh (Steam Deck APU)
+        # -mprefer-vector-width=256     : use 256-bit AVX2 (native Zen 2 width)
+        # -fno-semantic-interposition   : cross-TU inlining without PLT overhead
+        # -falign-functions/loops=32    : Zen 2 fetch/decode block alignment
+        # -Dx86_version=3               : unlock AVX2+BMI2+FMA paths in xemu
+        export CC="ccache gcc"
+        export CXX="ccache g++"
+        export AR="gcc-ar"
+        export RANLIB="gcc-ranlib"
+        export CCACHE_CPP2=true
+        export CFLAGS="-march=znver2 -mtune=znver2 -mprefer-vector-width=256 -fno-semantic-interposition -falign-functions=32 -falign-loops=32"
+        bash build.sh -j$(nproc) -Dx86_version=3
+
+    - name: Package
+      run: |
+        # build.sh already placed the binary in dist/xemu via package_linux().
+        # Rename for clarity in the AppImage.
+        cp dist/xemu dist/xemu-steamdeck-zen2
+        chmod +x dist/xemu-steamdeck-zen2
+
+    - name: Generate AppImage
+      env:
+        VERSION: steamdeck-zen2-${{ github.sha }}
+      run: |
+        wget -q https://github.com/linuxdeploy/linuxdeploy/releases/latest/download/linuxdeploy-x86_64.AppImage
+        chmod +x linuxdeploy-x86_64.AppImage
+
+        mkdir -p AppDir/usr/bin
+        cp dist/xemu-steamdeck-zen2 AppDir/usr/bin/xemu
+
+        mkdir -p AppDir/usr/share/applications AppDir/usr/share/icons/hicolor/256x256/apps
+
+        cat > AppDir/usr/share/applications/xemu.desktop << 'EOF'
+        [Desktop Entry]
+        Name=xemu (Steam Deck Zen 2)
+        Comment=Original Xbox Emulator – Steam Deck Zen 2 custom build
+        Exec=xemu
+        Icon=xemu
+        Type=Application
+        Categories=Game;Emulator;
+        EOF
+
+        if [ -f ui/icons/xemu_256x256.png ]; then
+          cp ui/icons/xemu_256x256.png AppDir/usr/share/icons/hicolor/256x256/apps/xemu.png
+        fi
+
+        VERSION="${{ env.VERSION }}" ./linuxdeploy-x86_64.AppImage \
+          --appdir AppDir \
+          --output appimage
+
+        mv xemu*.AppImage dist/
+
+    - name: Report ccache stats
+      run: ccache -s
+
+    - name: Upload AppImage
+      uses: actions/upload-artifact@v6
+      with:
+        name: ${{ env.ARTIFACT_NAME }}
+        path: dist/xemu*.AppImage
+        compression-level: 0
+        retention-days: 30
