@@ -225,6 +225,48 @@ void lru_flush(Lru *lru)
 	}
 }
 
+/*
+ * Look up an existing node without triggering init_node on a miss.
+ * Returns the node (promoted to MRU) if found, or NULL if not cached.
+ */
+static inline
+LruNode *lru_lookup_existing(Lru *lru, uint64_t hash, const void *key)
+{
+	unsigned int bin = lru_hash_to_bin(lru, hash);
+	LruNode *iter;
+
+	QTAILQ_FOREACH(iter, &lru->bins[bin], next_bin) {
+		if ((iter->hash == hash) && !lru->compare_nodes(lru, iter, key)) {
+			QTAILQ_REMOVE(&lru->bins[bin], iter, next_bin);
+			QTAILQ_REMOVE(&lru->global, iter, next_global);
+			QTAILQ_INSERT_HEAD(&lru->global, iter, next_global);
+			QTAILQ_INSERT_HEAD(&lru->bins[bin], iter, next_bin);
+			return iter;
+		}
+	}
+	return NULL;
+}
+
+/*
+ * Reserve a free LRU slot for the given hash without calling init_node.
+ * The caller is responsible for fully initialising the returned node
+ * (including setting any key/value fields) before the node is visible to
+ * compare_nodes via a subsequent lookup.
+ */
+static inline
+LruNode *lru_reserve(Lru *lru, uint64_t hash)
+{
+	LruNode *node = lru_get_one_free(lru);
+	unsigned int bin = lru_hash_to_bin(lru, hash);
+	node->hash = hash;
+	lru->num_used += 1;
+	lru->num_free -= 1;
+	QTAILQ_REMOVE(&lru->global, node, next_global);
+	QTAILQ_INSERT_HEAD(&lru->global, node, next_global);
+	QTAILQ_INSERT_HEAD(&lru->bins[bin], node, next_bin);
+	return node;
+}
+
 typedef void (*LruNodeVisitorFunc)(Lru *lru, LruNode *node, void *opaque);
 
 static inline

@@ -46,6 +46,7 @@
 #include "xui/xemu-hud.h"
 #include "xemu-input.h"
 #include "xemu-settings.h"
+#include "xemu-steamdeck.h"
 // #include "xemu-shaders.h"
 #include "xemu-snapshots.h"
 #include "xemu-version.h"
@@ -1372,6 +1373,11 @@ int main(int argc, char **argv)
         exit(1);
     }
     atexit(xemu_settings_save);
+
+    if (xemu_is_steam_deck()) {
+        xemu_steamdeck_apply_defaults();
+        xemu_steamdeck_inject_accel_opts(&gArgc, &gArgv);
+    }
 
 #ifdef _WIN32
     if (g_config.display.setup_nvidia_profile) {

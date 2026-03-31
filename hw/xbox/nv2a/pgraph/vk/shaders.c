@@ -253,6 +253,36 @@ get_and_ref_shader_module_for_key(PGRAPHVkState *r,
     return module->module_info;
 }
 
+typedef struct {
+    PGRAPHVkState *r;
+    VkShaderStageFlagBits kind;
+    MString *code;
+    ShaderModuleInfo *result;
+    GMutex mutex;
+    GCond cond;
+    bool done;
+} ShaderStageJob;
+
+static void compile_stage_worker(gpointer data, gpointer user_data)
+{
+    ShaderStageJob *job = data;
+    job->result = pgraph_vk_create_shader_module_from_glsl(
+        job->r, job->kind, mstring_get_str(job->code));
+    g_mutex_lock(&job->mutex);
+    job->done = true;
+    g_cond_signal(&job->cond);
+    g_mutex_unlock(&job->mutex);
+}
+
+static void shader_stage_job_wait(ShaderStageJob *job)
+{
+    g_mutex_lock(&job->mutex);
+    while (!job->done) {
+        g_cond_wait(&job->cond, &job->mutex);
+    }
+    g_mutex_unlock(&job->mutex);
+}
+
 static void shader_cache_entry_init(Lru *lru, LruNode *node, const void *state)
 {
     PGRAPHVkState *r = container_of(lru, PGRAPHVkState, shader_cache);
@@ -262,36 +292,119 @@ static void shader_cache_entry_init(Lru *lru, LruNode *node, const void *state)
     NV2A_VK_DPRINTF("cache miss");
     nv2a_profile_inc_counter(NV2A_PROF_SHADER_GEN);
 
-    ShaderModuleCacheKey key;
-
     bool need_geometry_shader = pgraph_glsl_need_geom(&binding->state.geom);
+
+    /* Build all stage keys up-front.
+     * Indices: 0=VSH, 1=PSH, 2=GSH (optional).
+     */
+    ShaderModuleCacheKey keys[3];
+    int num_stages = 2;
+
+    memset(&keys[0], 0, sizeof(keys[0]));
+    keys[0].kind = VK_SHADER_STAGE_VERTEX_BIT;
+    keys[0].vsh.state = binding->state.vsh;
+    keys[0].vsh.glsl_opts.vulkan = true;
+    keys[0].vsh.glsl_opts.prefix_outputs = need_geometry_shader;
+    keys[0].vsh.glsl_opts.use_push_constants_for_uniform_attrs =
+        r->use_push_constants_for_uniform_attrs;
+    keys[0].vsh.glsl_opts.ubo_binding = VSH_UBO_BINDING;
+
+    memset(&keys[1], 0, sizeof(keys[1]));
+    keys[1].kind = VK_SHADER_STAGE_FRAGMENT_BIT;
+    keys[1].psh.state = binding->state.psh;
+    keys[1].psh.glsl_opts.vulkan = true;
+    keys[1].psh.glsl_opts.ubo_binding = PSH_UBO_BINDING;
+    keys[1].psh.glsl_opts.tex_binding = PSH_TEX_BINDING;
+
     if (need_geometry_shader) {
-        memset(&key, 0, sizeof(key));
-        key.kind = VK_SHADER_STAGE_GEOMETRY_BIT;
-        key.geom.state = binding->state.geom;
-        key.geom.glsl_opts.vulkan = true;
-        binding->geom.module_info = get_and_ref_shader_module_for_key(r, &key);
-    } else {
-        binding->geom.module_info = NULL;
+        memset(&keys[2], 0, sizeof(keys[2]));
+        keys[2].kind = VK_SHADER_STAGE_GEOMETRY_BIT;
+        keys[2].geom.state = binding->state.geom;
+        keys[2].geom.glsl_opts.vulkan = true;
+        num_stages = 3;
     }
 
-    memset(&key, 0, sizeof(key));
-    key.kind = VK_SHADER_STAGE_VERTEX_BIT;
-    key.vsh.state = binding->state.vsh;
-    key.vsh.glsl_opts.vulkan = true;
-    key.vsh.glsl_opts.prefix_outputs = need_geometry_shader;
-    key.vsh.glsl_opts.use_push_constants_for_uniform_attrs =
-        r->use_push_constants_for_uniform_attrs;
-    key.vsh.glsl_opts.ubo_binding = VSH_UBO_BINDING;
-    binding->vsh.module_info = get_and_ref_shader_module_for_key(r, &key);
+    /*
+     * For each stage: check the module cache. On a hit we just bump the
+     * ref-count (fast path, single-threaded). On a miss we reserve an LRU
+     * slot, generate GLSL (fast), then push the SPIR-V compilation to the
+     * thread pool so all misses overlap in time.
+     */
+    ShaderStageJob      jobs[3]     = {0};
+    ShaderModuleCacheEntry *reserved[3] = {NULL, NULL, NULL};
+    ShaderModuleInfo   *cached[3]   = {NULL, NULL, NULL};
 
-    memset(&key, 0, sizeof(key));
-    key.kind = VK_SHADER_STAGE_FRAGMENT_BIT;
-    key.psh.state = binding->state.psh;
-    key.psh.glsl_opts.vulkan = true;
-    key.psh.glsl_opts.ubo_binding = PSH_UBO_BINDING;
-    key.psh.glsl_opts.tex_binding = PSH_TEX_BINDING;
-    binding->psh.module_info = get_and_ref_shader_module_for_key(r, &key);
+    for (int i = 0; i < num_stages; i++) {
+        uint64_t hash =
+            fast_hash((void *)&keys[i], sizeof(ShaderModuleCacheKey));
+        LruNode *existing =
+            lru_lookup_existing(&r->shader_module_cache, hash, &keys[i]);
+
+        if (existing) {
+            /* Cache hit — ref for the binding and we're done. */
+            ShaderModuleCacheEntry *entry =
+                container_of(existing, ShaderModuleCacheEntry, node);
+            pgraph_vk_ref_shader_module(entry->module_info);
+            cached[i] = entry->module_info;
+        } else {
+            /* Cache miss — reserve slot, generate GLSL, submit to pool. */
+            LruNode *resv = lru_reserve(&r->shader_module_cache, hash);
+            reserved[i] = container_of(resv, ShaderModuleCacheEntry, node);
+            reserved[i]->module_info = NULL;
+            memcpy(&reserved[i]->key, &keys[i], sizeof(ShaderModuleCacheKey));
+
+            MString *code;
+            switch (keys[i].kind) {
+            case VK_SHADER_STAGE_VERTEX_BIT:
+                code = pgraph_glsl_gen_vsh(&keys[i].vsh.state,
+                                           keys[i].vsh.glsl_opts);
+                break;
+            case VK_SHADER_STAGE_GEOMETRY_BIT:
+                code = pgraph_glsl_gen_geom(&keys[i].geom.state,
+                                            keys[i].geom.glsl_opts);
+                break;
+            case VK_SHADER_STAGE_FRAGMENT_BIT:
+                code = pgraph_glsl_gen_psh(&keys[i].psh.state,
+                                           keys[i].psh.glsl_opts);
+                break;
+            default:
+                assert(!"unexpected shader stage");
+                code = NULL;
+            }
+
+            jobs[i].r    = r;
+            jobs[i].kind = keys[i].kind;
+            jobs[i].code = code;
+            jobs[i].done = false;
+            g_mutex_init(&jobs[i].mutex);
+            g_cond_init(&jobs[i].cond);
+
+            g_thread_pool_push(r->shader_compile_pool, &jobs[i], NULL);
+        }
+    }
+
+    /* Collect results from compile workers and fill reserved LRU slots. */
+    for (int i = 0; i < num_stages; i++) {
+        if (!reserved[i]) {
+            continue;
+        }
+        shader_stage_job_wait(&jobs[i]);
+
+        reserved[i]->module_info = jobs[i].result;
+        /* One ref owned by the module cache slot. */
+        pgraph_vk_ref_shader_module(reserved[i]->module_info);
+        /* One ref owned by the binding. */
+        pgraph_vk_ref_shader_module(reserved[i]->module_info);
+        cached[i] = reserved[i]->module_info;
+
+        mstring_unref(jobs[i].code);
+        g_cond_clear(&jobs[i].cond);
+        g_mutex_clear(&jobs[i].mutex);
+    }
+
+    binding->vsh.module_info  = cached[0];
+    binding->psh.module_info  = cached[1];
+    binding->geom.module_info = need_geometry_shader ? cached[2] : NULL;
 
     update_shader_uniform_locs(binding);
 }
@@ -530,10 +643,22 @@ void pgraph_vk_init_shaders(PGRAPHState *pg)
     r->use_push_constants_for_uniform_attrs =
         (r->device_props.limits.maxPushConstantsSize >=
          MAX_UNIFORM_ATTR_VALUES_SIZE);
+
+    int nthreads = MIN((int)g_get_num_processors() - 1, 4);
+    nthreads = MAX(nthreads, 1);
+    r->shader_compile_pool = g_thread_pool_new(compile_stage_worker, NULL,
+                                               nthreads, TRUE, NULL);
 }
 
 void pgraph_vk_finalize_shaders(PGRAPHState *pg)
 {
+    PGRAPHVkState *r = pg->vk_renderer_state;
+
+    if (r->shader_compile_pool) {
+        g_thread_pool_free(r->shader_compile_pool, FALSE, TRUE);
+        r->shader_compile_pool = NULL;
+    }
+
     shader_cache_finalize(pg);
     destroy_descriptor_sets(pg);
     destroy_descriptor_set_layout(pg);

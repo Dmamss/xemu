@@ -20,6 +20,7 @@
 #include "qemu/osdep.h"
 #include "qemu/fast-hash.h"
 #include "renderer.h"
+#include "ui/xemu-settings.h"
 #include <math.h>
 
 void pgraph_vk_draw_begin(NV2AState *d)
@@ -125,15 +126,27 @@ static void init_pipeline_cache(PGRAPHState *pg)
 {
     PGRAPHVkState *r = pg->vk_renderer_state;
 
+    /* Load persisted RDNA2/GPU pipeline cache from disk to skip recompilation. */
+    gsize blob_size = 0;
+    gchar *blob_data = NULL;
+    char *cache_path = g_strdup_printf("%svk_pipeline_cache.bin",
+                                       xemu_settings_get_base_path());
+    if (g_file_get_contents(cache_path, &blob_data, &blob_size, NULL)) {
+        fprintf(stderr, "[NV2A] Loaded Vulkan pipeline cache (%zu bytes)\n",
+                (size_t)blob_size);
+    }
+    g_free(cache_path);
+
     VkPipelineCacheCreateInfo cache_info = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO,
         .flags = 0,
-        .initialDataSize = 0,
-        .pInitialData = NULL,
+        .initialDataSize = (size_t)blob_size,
+        .pInitialData = blob_data,
         .pNext = NULL,
     };
     VK_CHECK(vkCreatePipelineCache(r->device, &cache_info, NULL,
                                    &r->vk_pipeline_cache));
+    g_free(blob_data);
 
     const size_t pipeline_cache_size = 2048;
     lru_init(&r->pipeline_cache);
@@ -156,6 +169,23 @@ static void finalize_pipeline_cache(PGRAPHState *pg)
     lru_flush(&r->pipeline_cache);
     g_free(r->pipeline_cache_entries);
     r->pipeline_cache_entries = NULL;
+
+    /* Persist compiled pipeline cache to disk for next session. */
+    size_t blob_size = 0;
+    VK_CHECK(vkGetPipelineCacheData(r->device, r->vk_pipeline_cache,
+                                    &blob_size, NULL));
+    if (blob_size > 0) {
+        gchar *blob_data = g_malloc(blob_size);
+        VK_CHECK(vkGetPipelineCacheData(r->device, r->vk_pipeline_cache,
+                                        &blob_size, blob_data));
+        char *cache_path = g_strdup_printf("%svk_pipeline_cache.bin",
+                                           xemu_settings_get_base_path());
+        g_file_set_contents(cache_path, blob_data, (gssize)blob_size, NULL);
+        g_free(cache_path);
+        g_free(blob_data);
+        fprintf(stderr, "[NV2A] Saved Vulkan pipeline cache (%zu bytes)\n",
+                blob_size);
+    }
 
     vkDestroyPipelineCache(r->device, r->vk_pipeline_cache, NULL);
 }
