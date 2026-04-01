@@ -775,18 +775,43 @@ static void apply_border_adjustment(const struct PixelShader *ps, MString *vars,
 static void apply_convolution_filter(const struct PixelShader *ps, MString *vars, int tex)
 {
     assert(ps->state->dim_tex[tex] == 2);
-    // FIXME: Quincunx
 
     g_autofree gchar *normalize_tex_coords = g_strdup_printf("norm%d", tex);
     const char *tex_remap = ps->state->rect_tex[tex] ? normalize_tex_coords : "";
 
-    mstring_append_fmt(vars,
-        "vec4 t%d = vec4(0.0);\n"
-        "for (int i = 0; i < 9; i++) {\n"
-        "    vec3 texCoordDelta = vec3(convolution3x3[i], 0);\n"
-        "    texCoordDelta.xy /= textureSize(texSamp%d, 0);\n"
-        "    t%d += textureProj(texSamp%d, %s(pT%d.xyw) + texCoordDelta) * gaussian3x3[i];\n"
-        "}\n", tex, tex, tex, tex, tex_remap, tex);
+    if (ps->state->conv_tex[tex] == CONVOLUTION_FILTER_QUINCUNX) {
+        /* Quincunx: center (weight 0.5) + 4 diagonal half-texel samples (weight 0.125 each) */
+        mstring_append_fmt(vars,
+            "vec4 t%d;\n"
+            "{\n"
+            "  vec2 tsize = vec2(textureSize(texSamp%d, 0));\n"
+            "  vec3 d0 = vec3( 0.5/tsize.x,  0.5/tsize.y, 0.0);\n"
+            "  vec3 d1 = vec3(-0.5/tsize.x,  0.5/tsize.y, 0.0);\n"
+            "  vec3 d2 = vec3( 0.5/tsize.x, -0.5/tsize.y, 0.0);\n"
+            "  vec3 d3 = vec3(-0.5/tsize.x, -0.5/tsize.y, 0.0);\n"
+            "  t%d  = textureProj(texSamp%d, %s(pT%d.xyw)      ) * 0.5;\n"
+            "  t%d += textureProj(texSamp%d, %s(pT%d.xyw) + d0) * 0.125;\n"
+            "  t%d += textureProj(texSamp%d, %s(pT%d.xyw) + d1) * 0.125;\n"
+            "  t%d += textureProj(texSamp%d, %s(pT%d.xyw) + d2) * 0.125;\n"
+            "  t%d += textureProj(texSamp%d, %s(pT%d.xyw) + d3) * 0.125;\n"
+            "}\n",
+            tex,
+            tex,
+            tex, tex, tex_remap, tex,
+            tex, tex, tex_remap, tex,
+            tex, tex, tex_remap, tex,
+            tex, tex, tex_remap, tex,
+            tex, tex, tex_remap, tex);
+    } else {
+        /* Gaussian 3x3 */
+        mstring_append_fmt(vars,
+            "vec4 t%d = vec4(0.0);\n"
+            "for (int i = 0; i < 9; i++) {\n"
+            "    vec3 texCoordDelta = vec3(convolution3x3[i], 0);\n"
+            "    texCoordDelta.xy /= textureSize(texSamp%d, 0);\n"
+            "    t%d += textureProj(texSamp%d, %s(pT%d.xyw) + texCoordDelta) * gaussian3x3[i];\n"
+            "}\n", tex, tex, tex, tex, tex_remap, tex);
+    }
 }
 
 static void define_colorkey_comparator(MString *preflight)
