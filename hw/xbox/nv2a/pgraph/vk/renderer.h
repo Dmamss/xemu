@@ -142,6 +142,8 @@ typedef struct SurfaceBinding {
     VkImageLayout image_scratch_current_layout;
     VmaAllocation allocation_scratch;
 
+    VkImageLayout current_layout; // actual image layout, updated on every transition
+
     bool initialized;
 } SurfaceBinding;
 
@@ -221,6 +223,7 @@ typedef struct TextureBinding {
     uint64_t hash;
     unsigned int draw_time;
     uint32_t submit_time;
+    bool surface_ref; // image/allocation borrowed from a SurfaceBinding, do not free
 } TextureBinding;
 
 typedef struct QueryReport {
@@ -550,6 +553,7 @@ void pgraph_vk_bind_textures(NV2AState *d);
 void pgraph_vk_mark_textures_possibly_dirty(NV2AState *d, hwaddr addr,
                                             hwaddr size);
 void pgraph_vk_trim_texture_cache(PGRAPHState *pg);
+void pgraph_vk_surface_invalidate_texture_refs(PGRAPHVkState *r, VkImage image);
 
 // shaders.c
 void pgraph_vk_init_shaders(PGRAPHState *pg);

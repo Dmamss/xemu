@@ -828,9 +828,8 @@ static void copy_surface_to_texture(PGRAPHState *pg, SurfaceBinding *surface,
 
     pgraph_vk_transition_image_layout(
         pg, cmd, surface->image, surface->host_fmt.vk_format,
-        surface->color ? VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL :
-                         VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
-        VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+        surface->current_layout, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+    surface->current_layout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
 
     pgraph_vk_transition_image_layout(pg, cmd, texture->image, vkf.vk_format,
                                       texture->current_layout,
@@ -852,11 +851,15 @@ static void copy_surface_to_texture(PGRAPHState *pg, SurfaceBinding *surface,
                    VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, texture->image,
                    texture->current_layout, 1, &region);
 
-    pgraph_vk_transition_image_layout(
-        pg, cmd, surface->image, surface->host_fmt.vk_format,
-        VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-        surface->color ? VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL :
-                         VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
+    {
+        VkImageLayout attachment_layout = surface->color ?
+            VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL :
+            VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+        pgraph_vk_transition_image_layout(
+            pg, cmd, surface->image, surface->host_fmt.vk_format,
+            VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, attachment_layout);
+        surface->current_layout = attachment_layout;
+    }
 
     pgraph_vk_transition_image_layout(pg, cmd, texture->image, vkf.vk_format,
                                       texture->current_layout,
@@ -1188,9 +1191,24 @@ static void create_texture(PGRAPHState *pg, int texture_idx)
 
     if (binding_found) {
         if (surface_to_texture) {
-            // FIXME: Add draw time tracking
             if (surface->draw_time != snode->draw_time) {
-                copy_surface_to_texture(pg, surface, snode);
+                if (snode->surface_ref) {
+                    /* Surface was re-rendered; re-transition to SHADER_READ_ONLY */
+                    VkCommandBuffer cmd = pgraph_vk_begin_nondraw_commands(pg);
+                    pgraph_vk_transition_image_layout(
+                        pg, cmd, surface->image, surface->host_fmt.vk_format,
+                        surface->current_layout,
+                        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+                    surface->current_layout =
+                        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+                    pgraph_vk_end_nondraw_commands(pg, cmd);
+                    snode->current_layout =
+                        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+                    snode->draw_time = surface->draw_time;
+                    nv2a_profile_inc_counter(NV2A_PROF_SURF_TO_TEX);
+                } else {
+                    copy_surface_to_texture(pg, surface, snode);
+                }
             }
         } else {
             if (possibly_dirty && content_hash != snode->hash) {
@@ -1234,18 +1252,28 @@ static void create_texture(PGRAPHState *pg, int texture_idx)
         .flags = (state.cubemap ? VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT : 0),
     };
 
-    if (surface_to_texture) {
-        pgraph_apply_scaling_factor(pg, &image_create_info.extent.width,
-                                        &image_create_info.extent.height);
+    /* Direct sampling: reuse surface image without copy when formats match */
+    bool direct_sample = surface_to_texture && surface->color &&
+                         surface->host_fmt.vk_format == vkf.vk_format;
+
+    if (direct_sample) {
+        snode->image = surface->image;
+        snode->allocation = VK_NULL_HANDLE;
+        snode->surface_ref = true;
+    } else {
+        if (surface_to_texture) {
+            pgraph_apply_scaling_factor(pg, &image_create_info.extent.width,
+                                            &image_create_info.extent.height);
+        }
+
+        VmaAllocationCreateInfo alloc_create_info = {
+            .usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE,
+        };
+
+        VK_CHECK(vmaCreateImage(r->allocator, &image_create_info,
+                                &alloc_create_info, &snode->image,
+                                &snode->allocation, NULL));
     }
-
-    VmaAllocationCreateInfo alloc_create_info = {
-        .usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE,
-    };
-
-    VK_CHECK(vmaCreateImage(r->allocator, &image_create_info,
-                            &alloc_create_info, &snode->image,
-                            &snode->allocation, NULL));
 
     VkImageViewCreateInfo image_view_create_info = {
         .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
@@ -1385,7 +1413,18 @@ static void create_texture(PGRAPHState *pg, int texture_idx)
 
     r->texture_bindings[texture_idx] = snode;
 
-    if (surface_to_texture) {
+    if (direct_sample) {
+        /* Transition surface to SHADER_READ_ONLY_OPTIMAL for direct sampling */
+        VkCommandBuffer cmd = pgraph_vk_begin_nondraw_commands(pg);
+        pgraph_vk_transition_image_layout(
+            pg, cmd, surface->image, surface->host_fmt.vk_format,
+            surface->current_layout, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        surface->current_layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        pgraph_vk_end_nondraw_commands(pg, cmd);
+        snode->current_layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        snode->draw_time = surface->draw_time;
+        nv2a_profile_inc_counter(NV2A_PROF_SURF_TO_TEX);
+    } else if (surface_to_texture) {
         copy_surface_to_texture(pg, surface, snode);
     } else {
         upload_texture_image(pg, texture_idx, snode);
@@ -1469,9 +1508,12 @@ static void texture_cache_release_node_resources(PGRAPHVkState *r, TextureBindin
     vkDestroyImageView(r->device, snode->image_view, NULL);
     snode->image_view = VK_NULL_HANDLE;
 
-    vmaDestroyImage(r->allocator, snode->image, snode->allocation);
+    if (!snode->surface_ref) {
+        vmaDestroyImage(r->allocator, snode->image, snode->allocation);
+    }
     snode->image = VK_NULL_HANDLE;
     snode->allocation = VK_NULL_HANDLE;
+    snode->surface_ref = false;
 }
 
 static bool texture_cache_entry_pre_evict(Lru *lru, LruNode *node)
@@ -1509,6 +1551,26 @@ static bool texture_cache_entry_compare(Lru *lru, LruNode *node,
 {
     TextureBinding *snode = container_of(node, TextureBinding, node);
     return memcmp(&snode->key, key, sizeof(TextureKey));
+}
+
+static void invalidate_surface_ref_visitor(Lru *lru, LruNode *node, void *opaque)
+{
+    PGRAPHVkState *r = container_of(lru, PGRAPHVkState, texture_cache);
+    TextureBinding *snode = container_of(node, TextureBinding, node);
+    VkImage image = *(VkImage *)opaque;
+
+    if (snode->surface_ref && snode->image == image) {
+        vkDestroyImageView(r->device, snode->image_view, NULL);
+        snode->image_view = VK_NULL_HANDLE;
+        snode->image = VK_NULL_HANDLE;
+        snode->allocation = VK_NULL_HANDLE;
+        snode->surface_ref = false;
+    }
+}
+
+void pgraph_vk_surface_invalidate_texture_refs(PGRAPHVkState *r, VkImage image)
+{
+    lru_visit_active(&r->texture_cache, invalidate_surface_ref_visitor, &image);
 }
 
 static void texture_cache_init(PGRAPHVkState *r)

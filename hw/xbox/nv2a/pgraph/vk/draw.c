@@ -1199,6 +1199,31 @@ static void begin_render_pass(PGRAPHState *pg)
 
     nv2a_profile_inc_counter(NV2A_PROF_PIPELINE_RENDERPASSES);
 
+    /* If a surface was transitioned to SHADER_READ_ONLY for direct sampling,
+     * transition it back to the layout the render pass expects. */
+    if (r->color_binding &&
+        r->color_binding->current_layout ==
+            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) {
+        pgraph_vk_transition_image_layout(
+            pg, r->command_buffer, r->color_binding->image,
+            r->color_binding->host_fmt.vk_format,
+            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+        r->color_binding->current_layout =
+            VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    }
+    if (r->zeta_binding &&
+        r->zeta_binding->current_layout ==
+            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) {
+        pgraph_vk_transition_image_layout(
+            pg, r->command_buffer, r->zeta_binding->image,
+            r->zeta_binding->host_fmt.vk_format,
+            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
+        r->zeta_binding->current_layout =
+            VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+    }
+
     unsigned int vp_width = pg->surface_binding_dim.width,
                  vp_height = pg->surface_binding_dim.height;
     pgraph_apply_scaling_factor(pg, &vp_width, &vp_height);
