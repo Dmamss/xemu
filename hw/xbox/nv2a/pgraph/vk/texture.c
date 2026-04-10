@@ -889,8 +889,7 @@ static unsigned int vk_format_texel_size(VkFormat format)
 static bool check_surface_to_texture_compatiblity(const SurfaceBinding *surface,
                                                   const TextureShape *shape)
 {
-    if ((!surface->swizzle && surface->pitch != shape->pitch) ||
-        surface->width != shape->width ||
+    if (surface->width != shape->width ||
         surface->height != shape->height ||
         shape->cubemap ||
         shape->levels > 1) {
@@ -902,9 +901,17 @@ static bool check_surface_to_texture_compatiblity(const SurfaceBinding *surface,
     }
 
     VkColorFormatInfo tex_vkf = kelvin_color_format_vk_map[shape->color_format];
-    return tex_vkf.vk_format &&
-           surface->host_fmt.host_bytes_per_pixel ==
-               vk_format_texel_size(tex_vkf.vk_format);
+    if (!tex_vkf.vk_format) {
+        return false;
+    }
+    if (surface->host_fmt.vk_format == tex_vkf.vk_format) {
+        return true;
+    }
+    /* Allow cross-format sampling for 32-bit RGBA variants (e.g., B8G8R8A8 <-> R8G8B8A8).
+     * vkCmdCopyImage between same-block-size formats is valid per Vulkan spec; the texture
+     * image view's component_map handles the channel reinterpretation. */
+    return surface->host_fmt.host_bytes_per_pixel == 4 &&
+           vk_format_texel_size(tex_vkf.vk_format) == 4;
 }
 
 static void create_dummy_texture(PGRAPHState *pg)
