@@ -1498,6 +1498,7 @@ static void texture_cache_entry_init(Lru *lru, LruNode *node, const void *state)
     snode->allocation = VK_NULL_HANDLE;
     snode->image_view = VK_NULL_HANDLE;
     snode->sampler = VK_NULL_HANDLE;
+    snode->surface_ref = false;
 }
 
 static void texture_cache_release_node_resources(PGRAPHVkState *r, TextureBinding *snode)

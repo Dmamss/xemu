@@ -1215,9 +1215,8 @@ void pgraph_vk_upload_surface_data(NV2AState *d, SurfaceBinding *surface,
 
     pgraph_vk_transition_image_layout(
         pg, cmd, surface->image, surface->host_fmt.vk_format,
-        surface->color ? VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL :
-                         VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
-        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+        surface->current_layout, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+    surface->current_layout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
 
     bool upscale = pg->surface_scale_factor > 1 &&
                    !use_compute_to_convert_depth_stencil_format;
@@ -1265,11 +1264,15 @@ void pgraph_vk_upload_surface_data(NV2AState *d, SurfaceBinding *surface,
         }
     }
 
-    pgraph_vk_transition_image_layout(
-        pg, cmd, surface->image, surface->host_fmt.vk_format,
-        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-        surface->color ? VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL :
-                         VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
+    {
+        VkImageLayout attachment_layout = surface->color ?
+            VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL :
+            VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+        pgraph_vk_transition_image_layout(
+            pg, cmd, surface->image, surface->host_fmt.vk_format,
+            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, attachment_layout);
+        surface->current_layout = attachment_layout;
+    }
 
     nv2a_profile_inc_counter(NV2A_PROF_QUEUE_SUBMIT_2);
     pgraph_vk_end_debug_marker(r, cmd);
