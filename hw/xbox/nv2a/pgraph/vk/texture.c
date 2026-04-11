@@ -1193,15 +1193,19 @@ static void create_texture(PGRAPHState *pg, int texture_idx)
         if (surface_to_texture) {
             if (surface->draw_time != snode->draw_time) {
                 if (snode->surface_ref) {
-                    /* Surface was re-rendered; re-transition to SHADER_READ_ONLY */
-                    VkCommandBuffer cmd = pgraph_vk_begin_nondraw_commands(pg);
-                    pgraph_vk_transition_image_layout(
-                        pg, cmd, surface->image, surface->host_fmt.vk_format,
-                        surface->current_layout,
-                        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-                    surface->current_layout =
-                        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-                    pgraph_vk_end_nondraw_commands(pg, cmd);
+                    /* Surface was re-rendered; re-transition to SHADER_READ_ONLY.
+                     * Skip if already there (another unit may have done it). */
+                    if (surface->current_layout !=
+                        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) {
+                        VkCommandBuffer cmd = pgraph_vk_begin_nondraw_commands(pg);
+                        pgraph_vk_transition_image_layout(
+                            pg, cmd, surface->image, surface->host_fmt.vk_format,
+                            surface->current_layout,
+                            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+                        surface->current_layout =
+                            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+                        pgraph_vk_end_nondraw_commands(pg, cmd);
+                    }
                     snode->current_layout =
                         VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
                     snode->draw_time = surface->draw_time;
@@ -1414,13 +1418,17 @@ static void create_texture(PGRAPHState *pg, int texture_idx)
     r->texture_bindings[texture_idx] = snode;
 
     if (direct_sample) {
-        /* Transition surface to SHADER_READ_ONLY_OPTIMAL for direct sampling */
-        VkCommandBuffer cmd = pgraph_vk_begin_nondraw_commands(pg);
-        pgraph_vk_transition_image_layout(
-            pg, cmd, surface->image, surface->host_fmt.vk_format,
-            surface->current_layout, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-        surface->current_layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-        pgraph_vk_end_nondraw_commands(pg, cmd);
+        /* Transition surface to SHADER_READ_ONLY_OPTIMAL for direct sampling.
+         * Another texture unit may have already done this transition for the
+         * same surface — skip if already in the target layout. */
+        if (surface->current_layout != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) {
+            VkCommandBuffer cmd = pgraph_vk_begin_nondraw_commands(pg);
+            pgraph_vk_transition_image_layout(
+                pg, cmd, surface->image, surface->host_fmt.vk_format,
+                surface->current_layout, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+            surface->current_layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+            pgraph_vk_end_nondraw_commands(pg, cmd);
+        }
         snode->current_layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
         snode->draw_time = surface->draw_time;
         nv2a_profile_inc_counter(NV2A_PROF_SURF_TO_TEX);
