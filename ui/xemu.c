@@ -1376,6 +1376,7 @@ int main(int argc, char **argv)
 
     if (xemu_is_steam_deck()) {
         xemu_steamdeck_apply_defaults();
+        xemu_steamdeck_apply_env_hints();
         xemu_steamdeck_inject_accel_opts(&gArgc, &gArgv);
     }
 

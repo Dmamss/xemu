@@ -113,6 +113,32 @@ void xemu_steamdeck_apply_defaults(void)
     }
 }
 
+void xemu_steamdeck_apply_env_hints(void)
+{
+    /*
+     * RADV graphics pipeline library: Mesa builds pipelines from linkable
+     * shader library objects so a draw call doesn't block on a full
+     * pipeline compile. Cuts traversal-time stutter on Vulkan renderer.
+     * Default-on in Mesa 24+, harmless to set explicitly on older Mesa.
+     */
+    setenv("RADV_PERFTEST", "gpl", 0);
+
+    /*
+     * Mesa GL threading: offloads GL API calls to a worker thread, freeing
+     * the nv2a pgraph thread on the OpenGL renderer path. Mesa keeps a
+     * per-app allow-list; setting the env var force-enables for xemu.
+     */
+    setenv("mesa_glthread", "true", 0);
+
+    /*
+     * Single-file Mesa shader disk cache: avoids fsync churn from the
+     * default multi-file layout and speeds up cache hits at startup.
+     */
+    setenv("MESA_DISK_CACHE_SINGLE_FILE", "1", 0);
+
+    fprintf(stderr, "[SteamDeck] Mesa/RADV env hints applied\n");
+}
+
 void xemu_steamdeck_inject_accel_opts(int *argc, char ***argv)
 {
     /* Don't override if the user explicitly passed -accel */

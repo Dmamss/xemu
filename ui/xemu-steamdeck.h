@@ -58,3 +58,11 @@ void xemu_steamdeck_apply_defaults(void);
  * thread is created. No-op if -accel is already present in argv.
  */
 void xemu_steamdeck_inject_accel_opts(int *argc, char ***argv);
+
+/*
+ * Sets Mesa/RADV environment hints that reduce Vulkan pipeline-compile
+ * stutter and let the Mesa OpenGL driver offload API calls to a worker
+ * thread. Must run before SDL_GL_CreateContext / Vulkan instance creation.
+ * Each variable is set with overwrite=0 so user-supplied values win.
+ */
+void xemu_steamdeck_apply_env_hints(void);
